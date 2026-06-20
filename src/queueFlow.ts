@@ -34,6 +34,51 @@ function clearFirstJoinTimer(queueId: string) {
   if (handle) { clearTimeout(handle); firstJoinTimers.delete(queueId); }
 }
 
+// Shared helper — start (or restart) the 15-min hard deadline for any queue that has players waiting
+function startFirstJoinTimerForQueue(params: {
+  queueId:          string;
+  channelId:        string;
+  guildId:          string;
+  gameId:           string;
+  teamSize:         number;
+  displayName:      string;
+  mmrEnabled:       boolean;
+  inactivityMinutes: number;
+  client:           any;
+  currentMsgId:     string | null;
+}) {
+  const { queueId, channelId, guildId, gameId, teamSize, displayName, mmrEnabled, inactivityMinutes, client, currentMsgId } = params;
+  clearFirstJoinTimer(queueId);
+
+  const handle = setTimeout(async () => {
+    firstJoinTimers.delete(queueId);
+    const { data: q } = await supabase.from('eights_queues').select('status, message_id').eq('id', queueId).single();
+    if (!q || q.status !== 'waiting') return;
+
+    await supabase.from('eights_queues').update({ status: 'cancelled' }).eq('id', queueId);
+    await supabase.from('eights_queue_players').delete().eq('queue_id', queueId);
+    if (inactivityTimers.has(queueId)) { clearTimeout(inactivityTimers.get(queueId)!); inactivityTimers.delete(queueId); }
+
+    try {
+      const ch = await client.channels.fetch(channelId) as TextChannel;
+      const msgId = q.message_id || currentMsgId;
+      if (msgId) {
+        const old = await ch.messages.fetch(msgId).catch(() => null);
+        if (old) await old.edit({ content: `⌛ Queue expired — no match found in ${FIRST_JOIN_MINUTES} minutes.`, embeds: [], components: [] }).catch(() => {});
+      }
+      const { data: newQ } = await supabase.from('eights_queues').insert({
+        guild_id: guildId, channel_id: channelId, game_id: gameId, team_size: teamSize, status: 'waiting',
+      }).select('id').single();
+      if (newQ) {
+        const freshMsgId = await refreshQueueEmbed(ch, newQ.id, teamSize, displayName, mmrEnabled, null, inactivityMinutes);
+        if (freshMsgId) await supabase.from('eights_queues').update({ message_id: freshMsgId }).eq('id', newQ.id);
+      }
+    } catch (err) { console.error('[firstJoinTimer] Error resetting queue:', err); }
+  }, FIRST_JOIN_MINUTES * 60 * 1000);
+
+  firstJoinTimers.set(queueId, handle);
+}
+
 function resetInactivityTimer(queueId: string, channelId: string, messageId: string | null, inactivityMinutes: number, channel: any) {
   if (inactivityTimers.has(queueId)) clearTimeout(inactivityTimers.get(queueId)!);
 
@@ -233,58 +278,18 @@ export async function handleJoinButton(interaction: ButtonInteraction) {
 
   // First player joined — start the hard 15-min deadline
   if (count === 1) {
-    clearFirstJoinTimer(queue.id); // clear any stale timer from a previous cycle
-    const fjClient        = interaction.client;
-    const fjQueueId       = queue.id;
-    const fjChannelId     = channelId;
-    const fjGuildId       = guildId;
-    const fjGameId        = config.game_id;
-    const fjTeamSize      = config.team_size;
-    const fjDisplayName   = displayName;
-    const fjMmrEnabled    = config.mmr_enabled;
-    const fjInactivity    = config.inactivity_minutes ?? 60;
-    const fjMsgId         = newMsgId || queue.message_id;
-
-    const handle = setTimeout(async () => {
-      firstJoinTimers.delete(fjQueueId);
-      const { data: q } = await supabase.from('eights_queues').select('status, message_id').eq('id', fjQueueId).single();
-      if (!q || q.status !== 'waiting') return; // already filled or cancelled
-
-      // Cancel the timed-out queue
-      await supabase.from('eights_queues').update({ status: 'cancelled' }).eq('id', fjQueueId);
-      await supabase.from('eights_queue_players').delete().eq('queue_id', fjQueueId);
-      clearFirstJoinTimer(fjQueueId);
-      if (inactivityTimers.has(fjQueueId)) {
-        clearTimeout(inactivityTimers.get(fjQueueId)!);
-        inactivityTimers.delete(fjQueueId);
-      }
-
-      try {
-        const ch = await fjClient.channels.fetch(fjChannelId) as TextChannel;
-        // Edit old embed to show it expired
-        const msgId = q.message_id || fjMsgId;
-        if (msgId) {
-          const old = await ch.messages.fetch(msgId).catch(() => null);
-          if (old) await old.edit({ content: `⌛ Queue expired — no match found in ${FIRST_JOIN_MINUTES} minutes.`, embeds: [], components: [] }).catch(() => {});
-        }
-        // Create fresh waiting queue + post new embed so the channel stays active
-        const { data: newQ } = await supabase.from('eights_queues').insert({
-          guild_id:  fjGuildId,
-          channel_id: fjChannelId,
-          game_id:   fjGameId,
-          team_size: fjTeamSize,
-          status:    'waiting',
-        }).select('id').single();
-        if (newQ) {
-          const freshMsgId = await refreshQueueEmbed(ch, newQ.id, fjTeamSize, fjDisplayName, fjMmrEnabled, null, fjInactivity);
-          if (freshMsgId) await supabase.from('eights_queues').update({ message_id: freshMsgId }).eq('id', newQ.id);
-        }
-      } catch (err) {
-        console.error('[firstJoinTimer] Error resetting queue:', err);
-      }
-    }, FIRST_JOIN_MINUTES * 60 * 1000);
-
-    firstJoinTimers.set(queue.id, handle);
+    startFirstJoinTimerForQueue({
+      queueId:           queue.id,
+      channelId,
+      guildId,
+      gameId:            config.game_id,
+      teamSize:          config.team_size,
+      displayName,
+      mmrEnabled:        config.mmr_enabled,
+      inactivityMinutes: config.inactivity_minutes ?? 60,
+      client:            interaction.client,
+      currentMsgId:      newMsgId || queue.message_id,
+    });
   }
 
   if (count >= total) {
@@ -673,32 +678,55 @@ export async function startMatchFromTeams(
   // ── VC Management ─────────────────────────────────────────────────────────
   const { data: vcConfig } = await supabase
     .from('eights_channel_config')
-    .select('lobby_vc_id, vc_join_minutes, mmr_enabled, queue_name')
+    .select('lobby_vc_id, vc_join_minutes, mmr_enabled, queue_name, inactivity_minutes')
     .eq('guild_id', queue.guild_id).eq('channel_id', queue.channel_id).single();
 
   const vcJoinMinutes = vcConfig?.vc_join_minutes ?? 0;
   if (vcJoinMinutes > 0 && voteMsg.guild) {
     const { data: gameRow } = await supabase.from('games').select('name').eq('id', queue.game_id).single();
-    const gameName  = vcConfig?.queue_name || gameRow?.name || 'Queue';
-    const mmrEnabled = vcConfig?.mmr_enabled ?? true;
-    const teamSize   = queue.team_size as number;
+    const gameName        = vcConfig?.queue_name || gameRow?.name || 'Queue';
+    const mmrEnabled      = vcConfig?.mmr_enabled ?? true;
+    const teamSize        = queue.team_size as number;
+    const inactivityMins  = vcConfig?.inactivity_minutes ?? 60;
+    const vcClient        = voteMsg.client;
+    const vcChannelId     = queue.channel_id as string;
+    const vcGuildId       = queue.guild_id as string;
+    const vcGameId        = queue.game_id as string;
 
     await startVcPhase({
       guild:          voteMsg.guild,
       matchId:        match.id,
       queueId,
-      queueChannelId: queue.channel_id,
-      guildId:        queue.guild_id,
+      queueChannelId: vcChannelId,
+      guildId:        vcGuildId,
       teamSize,
       gameName,
       mmrEnabled,
-      gameId:         queue.game_id,
+      gameId:         vcGameId,
       team1Ids:       team1.map(p => p.discord_id),
       team2Ids:       team2.map(p => p.discord_id),
       lobbyVcId:      vcConfig?.lobby_vc_id ?? null,
       vcJoinMinutes,
-      onRequeue: (newQueueId: string, channel: any) =>
-        handleQueueFull(channel, newQueueId, teamSize, gameName, mmrEnabled, null),
+      // Re-queue only the players who showed up; start the 15-min timer so the partial queue
+      // can expire if no replacement joins in time.
+      onRequeue: async (newQueueId: string, presentIds: string[], channel: any) => {
+        const msgId = await refreshQueueEmbed(channel, newQueueId, teamSize, gameName, mmrEnabled, null, inactivityMins);
+        if (msgId) await supabase.from('eights_queues').update({ message_id: msgId }).eq('id', newQueueId);
+        if (presentIds.length > 0) {
+          startFirstJoinTimerForQueue({
+            queueId:           newQueueId,
+            channelId:         vcChannelId,
+            guildId:           vcGuildId,
+            gameId:            vcGameId,
+            teamSize,
+            displayName:       gameName,
+            mmrEnabled,
+            inactivityMinutes: inactivityMins,
+            client:            vcClient,
+            currentMsgId:      msgId,
+          });
+        }
+      },
     });
   }
 }

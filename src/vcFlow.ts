@@ -23,7 +23,7 @@ interface VcPhaseState {
   team2VcId:      string;
   lobbyVcId:      string | null;
   vcJoinMinutes:  number;
-  onRequeue:      (newQueueId: string, channel: TextChannel) => Promise<void>;
+  onRequeue:      (newQueueId: string, presentIds: string[], channel: TextChannel) => Promise<void>;
   timer:          ReturnType<typeof setTimeout>;
 }
 
@@ -45,7 +45,7 @@ export async function startVcPhase(params: {
   team2Ids:       string[];
   lobbyVcId:      string | null;
   vcJoinMinutes:  number;
-  onRequeue:      (newQueueId: string, channel: TextChannel) => Promise<void>;
+  onRequeue:      (newQueueId: string, presentIds: string[], channel: TextChannel) => Promise<void>;
 }) {
   const {
     guild, matchId, queueId, queueChannelId, guildId,
@@ -163,23 +163,28 @@ async function checkVcPhase(matchId: string) {
   const inTeam1 = new Set(team1Vc?.members.map(m => m.id) ?? []);
   const inTeam2 = new Set(team2Vc?.members.map(m => m.id) ?? []);
 
+  // Who made it to their correct VC vs who didn't
+  const present1 = state.team1Ids.filter(id => inTeam1.has(id));
+  const present2 = state.team2Ids.filter(id => inTeam2.has(id));
   const missing1 = state.team1Ids.filter(id => !inTeam1.has(id));
   const missing2 = state.team2Ids.filter(id => !inTeam2.has(id));
+  const presentIds = [...present1, ...present2];
+  const missingIds = [...missing1, ...missing2];
 
-  if (missing1.length === 0 && missing2.length === 0) {
+  if (missingIds.length === 0) {
     // All players present — match continues normally
     return;
   }
 
-  const missingMentions = [...missing1, ...missing2].map(id => `<@${id}>`).join(', ');
-  console.log(`[vcFlow] Match ${matchId} cancelled — VC timeout for: ${[...missing1, ...missing2].join(', ')}`);
+  const missingMentions = missingIds.map(id => `<@${id}>`).join(', ');
+  console.log(`[vcFlow] Match ${matchId} cancelled — VC timeout for: ${missingIds.join(', ')}`);
 
   // Fetch lobby VC
   const lobbyVc = state.lobbyVcId
     ? guild.channels.cache.get(state.lobbyVcId) as VoiceChannel | undefined
     : undefined;
 
-  // Move everyone from team VCs back to lobby (or disconnect)
+  // Move PRESENT players (who are in team VCs) back to lobby
   for (const vc of [team1Vc, team2Vc]) {
     if (!vc) continue;
     for (const [, member] of vc.members) {
@@ -199,16 +204,15 @@ async function checkVcPhase(matchId: string) {
   // Cancel match in DB
   await supabase.from('eights_matches').update({ status: 'cancelled' }).eq('id', matchId);
 
-  // Get current MMR for everyone
-  const allIds = [...state.team1Ids, ...state.team2Ids];
+  // Get MMR only for the players who showed up
   const { data: mmrRows } = await supabase
     .from('eights_player_mmr')
     .select('discord_id, mmr')
-    .in('discord_id', allIds)
+    .in('discord_id', presentIds)
     .eq('guild_id', state.guildId);
   const mmrMap = new Map((mmrRows || []).map((r: any) => [r.discord_id as string, r.mmr as number]));
 
-  // Re-create queue with all 8 players
+  // Re-create queue with ONLY the players who showed up
   const { data: newQueue } = await supabase
     .from('eights_queues')
     .insert({
@@ -223,15 +227,19 @@ async function checkVcPhase(matchId: string) {
 
   if (!newQueue) return;
 
-  await supabase.from('eights_queue_players').insert(
-    allIds.map(id => ({
-      queue_id:          newQueue.id,
-      discord_id:        id,
-      mmr_at_queue_time: mmrMap.get(id) ?? 1000,
-    }))
-  );
+  if (presentIds.length > 0) {
+    await supabase.from('eights_queue_players').insert(
+      presentIds.map(id => ({
+        queue_id:          newQueue.id,
+        discord_id:        id,
+        mmr_at_queue_time: mmrMap.get(id) ?? 1000,
+      }))
+    );
+  }
 
-  // Post notice + immediately trigger team vote
+  const spotsOpen = state.teamSize * 2 - presentIds.length;
+  const lobbyText = lobbyVc ? `<#${lobbyVc.id}>` : 'the lobby';
+
   try {
     const ch = await guild.channels.fetch(state.queueChannelId) as TextChannel | null;
     if (!ch?.isTextBased()) return;
@@ -239,18 +247,19 @@ async function checkVcPhase(matchId: string) {
     await ch.send({
       embeds: [
         new EmbedBuilder()
-          .setTitle('⚠️ Match Cancelled — VC Timeout')
+          .setTitle('⚠️ Match Cancelled — VC No-Show')
           .setColor(0xEF4444)
           .setDescription(
             `${missingMentions} did not join their team voice channel in time.\n\n` +
-            `All players have been moved back to ${lobbyVc ? `<#${lobbyVc.id}>` : 'the lobby'} ` +
-            `and re-queued. Starting a new team vote now...`
+            `**${presentIds.length} player${presentIds.length !== 1 ? 's' : ''}** who showed up ` +
+            `${presentIds.length > 0 ? `have been moved back to ${lobbyText} and re-queued` : 'were removed'}. ` +
+            `**${spotsOpen} spot${spotsOpen !== 1 ? 's' : ''} open** — click Join Queue to fill the queue!`
           ),
       ],
     });
 
-    // Immediately go to team vote (queue is already full)
-    await state.onRequeue(newQueue.id, ch);
+    // Let queueFlow handle the embed + 15-min timer (it knows mmrEnabled, inactivity, etc.)
+    await state.onRequeue(newQueue.id, presentIds, ch);
 
   } catch (err) {
     console.error('[vcFlow] Re-queue failed:', err);
