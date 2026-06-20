@@ -7,12 +7,19 @@ import { handleLeave }       from './commands/leave';
 import { handleStatus }      from './commands/status';
 import { handleStats }       from './commands/stats';
 import { handleLeaderboard } from './commands/leaderboard';
-import { handleSetup }       from './commands/setup';
 import {
   handleTeamVoteButton,
   handleMapVoteButton,
   handleResultButton,
 } from './queueFlow';
+import {
+  handleSetupCommand,
+  handleSetupChannelSelect,
+  handleSetupGameSelect,
+  handleSetupSizeSelect,
+  handleSetupSave,
+  handleSetupCancel,
+} from './setupFlow';
 
 const client = new Client({
   intents: [
@@ -35,7 +42,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       if (commandName === 'queue')        return await handleStatus(interaction);
       if (commandName === 'stats')        return await handleStats(interaction);
       if (commandName === 'leaderboard')  return await handleLeaderboard(interaction);
-      if (commandName === '8s-setup')     return await handleSetup(interaction);
+      if (commandName === '8s-setup')     return await handleSetupCommand(interaction);
     } catch (err) {
       console.error(`Error in /${commandName}:`, err);
       const msg = { content: '❌ Something went wrong. Try again.', ephemeral: true };
@@ -48,10 +55,27 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     return;
   }
 
+  // ── Select menu interactions ──
+  if (interaction.isChannelSelectMenu()) {
+    if (interaction.customId === 'setup_channel') return await handleSetupChannelSelect(interaction);
+    return;
+  }
+  if (interaction.isStringSelectMenu()) {
+    try {
+      if (interaction.customId === 'setup_game') return await handleSetupGameSelect(interaction);
+      if (interaction.customId === 'setup_size') return await handleSetupSizeSelect(interaction);
+    } catch (err) {
+      console.error(`Error in select ${interaction.customId}:`, err);
+    }
+    return;
+  }
+
   // ── Button interactions ──
   if (interaction.isButton()) {
     const { customId } = interaction;
     try {
+      if (customId === 'setup_save')   return await handleSetupSave(interaction);
+      if (customId === 'setup_cancel') return await handleSetupCancel(interaction);
       if (customId.startsWith('teamvote_')) {
         const choice = customId.replace('teamvote_', '') as 'random' | 'captains' | 'balanced';
         return await handleTeamVoteButton(interaction, choice);
