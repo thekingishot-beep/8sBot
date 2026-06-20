@@ -24,6 +24,12 @@ import {
   handleSetupResultsChannelSelect,
   handleSetupGameSelect,
   handleSetupSizeSelect,
+  handleSetupStaffRoleSelect,
+  handleSetupInactivitySelect,
+  handleSetupNext,
+  handleSetupBack,
+  handleSetupQueueNameButton,
+  handleSetupQueueNameModal,
   handleSetupSave,
   handleSetupCancel,
 } from './setupFlow';
@@ -69,14 +75,25 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     return;
   }
 
+  if (interaction.isRoleSelectMenu()) {
+    if (interaction.customId === 'setup_staff_role') return await handleSetupStaffRoleSelect(interaction);
+    return;
+  }
+
   if (interaction.isStringSelectMenu()) {
     try {
       if (interaction.customId === 'setup_game')          return await handleSetupGameSelect(interaction);
       if (interaction.customId === 'setup_size')          return await handleSetupSizeSelect(interaction);
+      if (interaction.customId === 'setup_inactivity')    return await handleSetupInactivitySelect(interaction);
       if (interaction.customId.startsWith('lb_type_'))    return await handleLeaderboardTypeSelect(interaction);
     } catch (err) {
       console.error(`Error in select ${interaction.customId}:`, err);
     }
+    return;
+  }
+
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId === 'setup_queue_name_modal') return await handleSetupQueueNameModal(interaction);
     return;
   }
 
@@ -85,8 +102,11 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     const { customId } = interaction;
     try {
       // Setup flow
-      if (customId === 'setup_save')   return await handleSetupSave(interaction);
-      if (customId === 'setup_cancel') return await handleSetupCancel(interaction);
+      if (customId === 'setup_next')        return await handleSetupNext(interaction);
+      if (customId === 'setup_back')        return await handleSetupBack(interaction);
+      if (customId === 'setup_queue_name')  return await handleSetupQueueNameButton(interaction);
+      if (customId === 'setup_save')        return await handleSetupSave(interaction);
+      if (customId === 'setup_cancel')      return await handleSetupCancel(interaction);
 
       // Queue join/leave/admin
       if (customId === 'queue_join')         return await handleJoinButton(interaction);
