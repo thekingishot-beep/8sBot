@@ -19,11 +19,26 @@ export async function handleStatus(interaction: ChatInputCommandInteraction) {
 
   const { data: players } = await supabase
     .from('eights_queue_players')
-    .select('discord_id')
+    .select('discord_id, mmr_at_queue_time')
     .eq('queue_id', queue.id);
 
-  const playerTags = (players || []).map(p => `<@${p.discord_id}>`);
-  const embed = buildQueueEmbed(playerTags, queue.team_size);
+  const { data: config } = await supabase
+    .from('eights_channel_config')
+    .select('mmr_enabled, game_id')
+    .eq('guild_id', interaction.guildId!)
+    .eq('channel_id', interaction.channelId)
+    .single();
+
+  const { data: gameRow } = config?.game_id
+    ? await supabase.from('games').select('name').eq('id', config.game_id).single()
+    : { data: null };
+
+  const playerList = (players || []).map(p => ({
+    tag: `<@${p.discord_id}>`,
+    mmr: p.mmr_at_queue_time,
+  }));
+
+  const { embed } = buildQueueEmbed(playerList, queue.team_size, gameRow?.name || 'Queue', config?.mmr_enabled ?? true);
 
   await interaction.editReply({ embeds: [embed] });
 }

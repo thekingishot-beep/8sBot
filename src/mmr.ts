@@ -97,9 +97,13 @@ export async function applyMmrAfterMatch(
 
     // Only bump peak_mmr if the new value is actually higher
     if (d.delta > 0) {
-      await supabase.rpc('eights_maybe_update_peak', { p_discord_id: d.discordId, p_guild_id: guildId, p_mmr: d.mmrAfter })
-        .maybeSingle()
-        .catch(() => null); // rpc may not exist yet — fallback is fine
+      try {
+        await supabase.from('eights_player_mmr')
+          .update({ peak_mmr: d.mmrAfter })
+          .eq('discord_id', d.discordId)
+          .eq('guild_id', guildId)
+          .lt('peak_mmr', d.mmrAfter);
+      } catch { /* non-fatal */ }
     }
   }
 
