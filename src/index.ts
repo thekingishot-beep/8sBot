@@ -10,7 +10,6 @@ import { handleLeaderboard, handleLeaderboardButton, handleLeaderboardTypeSelect
 import {
   handleTeamVoteButton,
   handleMmrVoteButton,
-  handleMapVoteButton,
   handleResultButton,
   handleJoinButton,
   handleLeaveButton,
@@ -119,28 +118,31 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       if (customId === 'queue_force_start')  return await handleForceStart(interaction);
       if (customId === 'queue_cancel')       return await handleCancelQueue(interaction);
 
-      // Team vote
+      // Team vote — format: teamvote_{choice}_{queueId}
       if (customId.startsWith('teamvote_')) {
-        const choice = customId.replace('teamvote_', '') as 'random' | 'captains' | 'balanced' | 'unfair';
-        return await handleTeamVoteButton(interaction, choice);
+        const rest        = customId.slice('teamvote_'.length);
+        const sepIdx      = rest.indexOf('_');
+        const choice      = rest.slice(0, sepIdx) as 'random' | 'captains' | 'balanced' | 'unfair';
+        const queueId     = rest.slice(sepIdx + 1);
+        return await handleTeamVoteButton(interaction, choice, queueId);
       }
 
-      // MMR vote
+      // MMR vote — format: mmrvote_{choice}_{queueId}
       if (customId.startsWith('mmrvote_')) {
-        const choice = customId.replace('mmrvote_', '') as 'enable' | 'disable';
-        return await handleMmrVoteButton(interaction, choice);
+        const rest    = customId.slice('mmrvote_'.length);
+        const sepIdx  = rest.indexOf('_');
+        const choice  = rest.slice(0, sepIdx) as 'enable' | 'disable';
+        const queueId = rest.slice(sepIdx + 1);
+        return await handleMmrVoteButton(interaction, choice, queueId);
       }
 
-      // Map vote
-      if (customId.startsWith('mapvote_')) {
-        const mapId = customId.replace('mapvote_', '');
-        return await handleMapVoteButton(interaction, mapId);
-      }
-
-      // Captain pick
+      // Captain pick — format: captain_pick_{queueId}_{discordId}
       if (customId.startsWith('captain_pick_')) {
-        const pickedId = customId.replace('captain_pick_', '');
-        return await handleCaptainPickButton(interaction, pickedId);
+        const rest          = customId.slice('captain_pick_'.length);
+        const lastUnderscore = rest.lastIndexOf('_');
+        const queueId       = rest.slice(0, lastUnderscore);
+        const pickedId      = rest.slice(lastUnderscore + 1);
+        return await handleCaptainPickButton(interaction, queueId, pickedId);
       }
 
       // Result vote

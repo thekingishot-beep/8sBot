@@ -60,6 +60,7 @@ export function buildQueueEmbed(
 // ─── Team vote embed ───────────────────────────────────────────────────────────
 
 export function buildTeamVoteEmbed(
+  queueId: string,
   votes: Record<string, string[]> = {},
   mmrVotes: Record<string, string[]> = {}
 ) {
@@ -79,15 +80,15 @@ export function buildTeamVoteEmbed(
     );
 
   const voteRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('teamvote_balanced').setLabel('Balanced').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('teamvote_captains').setLabel('Captains').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('teamvote_random').setLabel('Random').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('teamvote_unfair').setLabel('Unfair').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`teamvote_balanced_${queueId}`).setLabel('Balanced').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`teamvote_captains_${queueId}`).setLabel('Captains').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`teamvote_random_${queueId}`).setLabel('Random').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`teamvote_unfair_${queueId}`).setLabel('Unfair').setStyle(ButtonStyle.Primary),
   );
 
   const mmrRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('mmrvote_enable').setLabel('Enable MMR').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('mmrvote_disable').setLabel('Disable MMR').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`mmrvote_enable_${queueId}`).setLabel('Enable MMR').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`mmrvote_disable_${queueId}`).setLabel('Disable MMR').setStyle(ButtonStyle.Danger),
   );
 
   return { embed, rows: [voteRow, mmrRow] };
@@ -126,17 +127,21 @@ export function buildMatchEmbed(
   map: string,
   mode: string,
   teamSelection: string,
-  matchNumber?: number
+  matchNumber?: number,
+  captain1Name?: string,
+  captain2Name?: string
 ) {
   const title = matchNumber ? `⚔️ Match #${matchNumber}` : '⚔️ Match Ready';
+  const t1Label = captain1Name ? `🔵 ${captain1Name}'s Team Won` : '🔵 Team 1 Won';
+  const t2Label = captain2Name ? `🔴 ${captain2Name}'s Team Won` : '🔴 Team 2 Won';
 
   const embed = new EmbedBuilder()
     .setTitle(title)
     .setColor(0x10B981)
     .setDescription('GL HF! Report the result when done.')
     .addFields(
-      { name: '🔵 Team 1', value: team1.join('\n') || '—', inline: true },
-      { name: '🔴 Team 2', value: team2.join('\n') || '—', inline: true },
+      { name: captain1Name ? `🔵 ${captain1Name}'s Team` : '🔵 Team 1', value: team1.join('\n') || '—', inline: true },
+      { name: captain2Name ? `🔴 ${captain2Name}'s Team` : '🔴 Team 2', value: team2.join('\n') || '—', inline: true },
       { name: '​',    value: '​',                 inline: true },
       { name: '🗺️ Map',    value: map,                      inline: true },
       { name: '🎯 Mode',   value: mode,                     inline: true },
@@ -145,8 +150,8 @@ export function buildMatchEmbed(
     .setTimestamp();
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('result_1').setLabel('🔵 Team 1 Won').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('result_2').setLabel('🔴 Team 2 Won').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('result_1').setLabel(t1Label.slice(0, 80)).setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('result_2').setLabel(t2Label.slice(0, 80)).setStyle(ButtonStyle.Danger),
   );
 
   return { embed, row };

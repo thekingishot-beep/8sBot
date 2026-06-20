@@ -4,27 +4,31 @@ import {
   TextChannel,
   ChannelType,
   EmbedBuilder,
+  PermissionFlagsBits,
+  OverwriteType,
 } from 'discord.js';
 import { supabase } from './supabase';
 
 interface VcPhaseState {
-  matchId:        string;
-  queueId:        string;
-  queueChannelId: string;
-  guildId:        string;
-  guild:          Guild;
-  teamSize:       number;
-  gameName:       string;
-  mmrEnabled:     boolean;
-  gameId:         string;
-  team1Ids:       string[];
-  team2Ids:       string[];
-  team1VcId:      string;
-  team2VcId:      string;
-  lobbyVcId:      string | null;
-  vcJoinMinutes:  number;
-  onRequeue:      (newQueueId: string, presentIds: string[], channel: TextChannel) => Promise<void>;
-  timer:          ReturnType<typeof setTimeout>;
+  matchId:               string;
+  queueId:               string;
+  queueChannelId:        string;
+  announcementChannelId: string;
+  guildId:               string;
+  guild:                 Guild;
+  teamSize:              number;
+  gameName:              string;
+  mmrEnabled:            boolean;
+  gameId:                string;
+  team1Ids:              string[];
+  team2Ids:              string[];
+  team1VcId:             string;
+  team2VcId:             string;
+  lobbyVcId:             string | null;
+  staffRoleId:           string | null;
+  vcJoinMinutes:         number;
+  onRequeue:             (newQueueId: string, presentIds: string[], channel: TextChannel) => Promise<void>;
+  timer:                 ReturnType<typeof setTimeout>;
 }
 
 const vcPhases = new Map<string, VcPhaseState>();
@@ -32,48 +36,74 @@ const vcPhases = new Map<string, VcPhaseState>();
 // ─── Start VC phase after match embed is posted ───────────────────────────────
 
 export async function startVcPhase(params: {
-  guild:          Guild;
-  matchId:        string;
-  queueId:        string;
-  queueChannelId: string;
-  guildId:        string;
-  teamSize:       number;
-  gameName:       string;
-  mmrEnabled:     boolean;
-  gameId:         string;
-  team1Ids:       string[];
-  team2Ids:       string[];
-  lobbyVcId:      string | null;
-  vcJoinMinutes:  number;
-  onRequeue:      (newQueueId: string, presentIds: string[], channel: TextChannel) => Promise<void>;
+  guild:                 Guild;
+  matchId:               string;
+  queueId:               string;
+  queueChannelId:        string;
+  announcementChannelId: string;
+  guildId:               string;
+  teamSize:              number;
+  gameName:              string;
+  mmrEnabled:            boolean;
+  gameId:                string;
+  team1Ids:              string[];
+  team2Ids:              string[];
+  lobbyVcId:             string | null;
+  staffRoleId:           string | null;
+  vcJoinMinutes:         number;
+  onRequeue:             (newQueueId: string, presentIds: string[], channel: TextChannel) => Promise<void>;
 }) {
   const {
-    guild, matchId, queueId, queueChannelId, guildId,
+    guild, matchId, queueId, queueChannelId, announcementChannelId, guildId,
     teamSize, gameName, mmrEnabled, gameId,
-    team1Ids, team2Ids, lobbyVcId, vcJoinMinutes, onRequeue,
+    team1Ids, team2Ids, lobbyVcId, staffRoleId, vcJoinMinutes, onRequeue,
   } = params;
 
-  // Use the same category as the lobby VC (if set), so team VCs sit alongside it
+  // Use lobby VC's category so team VCs sit alongside it
   let categoryId: string | undefined;
   if (lobbyVcId) {
     const lobbyChannel = guild.channels.cache.get(lobbyVcId);
     if (lobbyChannel?.parentId) categoryId = lobbyChannel.parentId;
   }
 
+  // Permission helper for one team's VC
+  const buildOverwrites = (allowedIds: string[]) => [
+    // @everyone: can't see or join
+    {
+      id:   guild.id,
+      type: OverwriteType.Role,
+      deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect],
+    },
+    // Team members: full VC access
+    ...allowedIds.map(id => ({
+      id,
+      type:  OverwriteType.Member,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak],
+    })),
+    // Staff role: view + join (moderation)
+    ...(staffRoleId ? [{
+      id:    staffRoleId,
+      type:  OverwriteType.Role,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect],
+    }] : []),
+  ];
+
   let team1Vc: VoiceChannel, team2Vc: VoiceChannel;
   try {
     [team1Vc, team2Vc] = await Promise.all([
       guild.channels.create({
-        name:      '🔵 Team 1',
-        type:      ChannelType.GuildVoice,
-        parent:    categoryId,
-        userLimit: team1Ids.length,
+        name:                 '🔵 Team 1',
+        type:                 ChannelType.GuildVoice,
+        parent:               categoryId,
+        userLimit:            team1Ids.length,
+        permissionOverwrites: buildOverwrites(team1Ids),
       }) as Promise<VoiceChannel>,
       guild.channels.create({
-        name:      '🔴 Team 2',
-        type:      ChannelType.GuildVoice,
-        parent:    categoryId,
-        userLimit: team2Ids.length,
+        name:                 '🔴 Team 2',
+        type:                 ChannelType.GuildVoice,
+        parent:               categoryId,
+        userLimit:            team2Ids.length,
+        permissionOverwrites: buildOverwrites(team2Ids),
       }) as Promise<VoiceChannel>,
     ]);
   } catch (err) {
@@ -81,26 +111,31 @@ export async function startVcPhase(params: {
     return;
   }
 
+  // Store both VC IDs in the match record (comma-separated) for cleanup after result
+  await supabase
+    .from('eights_matches')
+    .update({ voice_channel_id: `${team1Vc.id},${team2Vc.id}` })
+    .eq('id', matchId);
+
   // Move or DM every player
   await Promise.all([
     moveOrDmTeam(guild, team1Ids, team1Vc, vcJoinMinutes),
     moveOrDmTeam(guild, team2Ids, team2Vc, vcJoinMinutes),
   ]);
 
-  // Announce in queue text channel
+  // Announce in the match's private text channel
   try {
-    const ch = await guild.channels.fetch(queueChannelId) as TextChannel | null;
+    const ch = await guild.channels.fetch(announcementChannelId) as TextChannel | null;
     if (ch?.isTextBased()) {
       await ch.send({
         embeds: [
           new EmbedBuilder()
-            .setTitle('🎮 Match Started — Team VCs Created')
+            .setTitle('🎮 Team VCs Created')
             .setColor(0x3B82F6)
             .setDescription(
-              `Players in a voice channel have been moved automatically.\n` +
-              `Players **not** in a VC have been DM'd with a link.\n\n` +
-              `⏱️ You have **${vcJoinMinutes} minute${vcJoinMinutes !== 1 ? 's' : ''}** to join your team VC.  ` +
-              `Anyone who misses the deadline cancels the match for everyone.`
+              `Players already in a voice channel have been moved automatically.\n` +
+              `Players **not** in a VC have been DM'd with a link to join.\n\n` +
+              `⏱️ You have **${vcJoinMinutes} minute${vcJoinMinutes !== 1 ? 's' : ''}** to join your team VC.`
             )
             .addFields(
               { name: '🔵 Team 1 VC', value: `<#${team1Vc.id}>`, inline: true },
@@ -114,20 +149,20 @@ export async function startVcPhase(params: {
   const timer = setTimeout(() => checkVcPhase(matchId), vcJoinMinutes * 60 * 1000);
 
   vcPhases.set(matchId, {
-    matchId, queueId, queueChannelId, guildId, guild,
+    matchId, queueId, queueChannelId, announcementChannelId, guildId, guild,
     teamSize, gameName, mmrEnabled, gameId,
     team1Ids, team2Ids,
     team1VcId: team1Vc.id,
     team2VcId: team2Vc.id,
-    lobbyVcId, vcJoinMinutes, onRequeue, timer,
+    lobbyVcId, staffRoleId, vcJoinMinutes, onRequeue, timer,
   });
 }
 
 async function moveOrDmTeam(
-  guild:        Guild,
-  playerIds:    string[],
-  targetVc:     VoiceChannel,
-  joinMinutes:  number
+  guild:       Guild,
+  playerIds:   string[],
+  targetVc:    VoiceChannel,
+  joinMinutes: number
 ) {
   for (const discordId of playerIds) {
     try {
@@ -163,28 +198,26 @@ async function checkVcPhase(matchId: string) {
   const inTeam1 = new Set(team1Vc?.members.map(m => m.id) ?? []);
   const inTeam2 = new Set(team2Vc?.members.map(m => m.id) ?? []);
 
-  // Who made it to their correct VC vs who didn't
-  const present1 = state.team1Ids.filter(id => inTeam1.has(id));
-  const present2 = state.team2Ids.filter(id => inTeam2.has(id));
-  const missing1 = state.team1Ids.filter(id => !inTeam1.has(id));
-  const missing2 = state.team2Ids.filter(id => !inTeam2.has(id));
+  const present1  = state.team1Ids.filter(id => inTeam1.has(id));
+  const present2  = state.team2Ids.filter(id => inTeam2.has(id));
+  const missing1  = state.team1Ids.filter(id => !inTeam1.has(id));
+  const missing2  = state.team2Ids.filter(id => !inTeam2.has(id));
   const presentIds = [...present1, ...present2];
   const missingIds = [...missing1, ...missing2];
 
   if (missingIds.length === 0) {
-    // All players present — match continues normally
+    // All players present — match continues normally, VCs stay until result
     return;
   }
 
   const missingMentions = missingIds.map(id => `<@${id}>`).join(', ');
   console.log(`[vcFlow] Match ${matchId} cancelled — VC timeout for: ${missingIds.join(', ')}`);
 
-  // Fetch lobby VC
   const lobbyVc = state.lobbyVcId
     ? guild.channels.cache.get(state.lobbyVcId) as VoiceChannel | undefined
     : undefined;
 
-  // Move PRESENT players (who are in team VCs) back to lobby
+  // Move present players back to lobby
   for (const vc of [team1Vc, team2Vc]) {
     if (!vc) continue;
     for (const [, member] of vc.members) {
@@ -201,7 +234,6 @@ async function checkVcPhase(matchId: string) {
     team2Vc?.delete('VC timeout — match cancelled').catch(() => {}),
   ]);
 
-  // Cancel match in DB
   await supabase.from('eights_matches').update({ status: 'cancelled' }).eq('id', matchId);
 
   // Get MMR only for the players who showed up
@@ -237,8 +269,8 @@ async function checkVcPhase(matchId: string) {
     );
   }
 
-  const spotsOpen = state.teamSize * 2 - presentIds.length;
-  const lobbyText = lobbyVc ? `<#${lobbyVc.id}>` : 'the lobby';
+  const spotsOpen  = state.teamSize * 2 - presentIds.length;
+  const lobbyText  = lobbyVc ? `<#${lobbyVc.id}>` : 'the lobby';
 
   try {
     const ch = await guild.channels.fetch(state.queueChannelId) as TextChannel | null;
@@ -258,7 +290,6 @@ async function checkVcPhase(matchId: string) {
       ],
     });
 
-    // Let queueFlow handle the embed + 15-min timer (it knows mmrEnabled, inactivity, etc.)
     await state.onRequeue(newQueue.id, presentIds, ch);
 
   } catch (err) {

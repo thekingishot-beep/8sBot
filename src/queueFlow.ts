@@ -1,10 +1,16 @@
-import { ButtonInteraction, Message, TextChannel } from 'discord.js';
+import {
+  ButtonInteraction,
+  Message,
+  TextChannel,
+  ChannelType,
+  PermissionFlagsBits,
+  OverwriteType,
+} from 'discord.js';
 import { supabase } from './supabase';
 import { getMapPool, pickRandomMaps } from './mapPool';
 import {
   buildQueueEmbed,
   buildTeamVoteEmbed,
-  buildMapVoteEmbed,
   buildMatchEmbed,
   buildWinnerEmbed,
 } from './queueEmbed';
@@ -20,13 +26,12 @@ import { startCaptainDraft } from './captainFlow';
 import { startVcPhase } from './vcFlow';
 
 const TEAM_VOTE_SECONDS  = 30;
-const MAP_VOTE_SECONDS   = 60;
 const FIRST_JOIN_MINUTES = 15;
 
-// ─── Inactivity timer map (queueId → timer) — resets on every join/leave ─────
+// ─── Inactivity timer map ─────────────────────────────────────────────────────
 const inactivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-// ─── First-join timer map (queueId → timer) — hard 15-min deadline from T=0 ─
+// ─── First-join timer map (15-min hard deadline) ──────────────────────────────
 const firstJoinTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function clearFirstJoinTimer(queueId: string) {
@@ -34,18 +39,17 @@ function clearFirstJoinTimer(queueId: string) {
   if (handle) { clearTimeout(handle); firstJoinTimers.delete(queueId); }
 }
 
-// Shared helper — start (or restart) the 15-min hard deadline for any queue that has players waiting
 function startFirstJoinTimerForQueue(params: {
-  queueId:          string;
-  channelId:        string;
-  guildId:          string;
-  gameId:           string;
-  teamSize:         number;
-  displayName:      string;
-  mmrEnabled:       boolean;
+  queueId:           string;
+  channelId:         string;
+  guildId:           string;
+  gameId:            string;
+  teamSize:          number;
+  displayName:       string;
+  mmrEnabled:        boolean;
   inactivityMinutes: number;
-  client:           any;
-  currentMsgId:     string | null;
+  client:            any;
+  currentMsgId:      string | null;
 }) {
   const { queueId, channelId, guildId, gameId, teamSize, displayName, mmrEnabled, inactivityMinutes, client, currentMsgId } = params;
   clearFirstJoinTimer(queueId);
@@ -85,7 +89,6 @@ function resetInactivityTimer(queueId: string, channelId: string, messageId: str
   const timer = setTimeout(async () => {
     inactivityTimers.delete(queueId);
 
-    // Only fire if queue is still waiting
     const { data: queue } = await supabase.from('eights_queues').select('status').eq('id', queueId).single();
     if (!queue || queue.status !== 'waiting') return;
 
@@ -106,7 +109,6 @@ function resetInactivityTimer(queueId: string, channelId: string, messageId: str
   inactivityTimers.set(queueId, timer);
 }
 
-// Helper: check if user is staff (has configured role OR ManageChannels permission)
 function isStaff(interaction: ButtonInteraction, staffRoleId: string | null): boolean {
   const member = interaction.member as any;
   if (member?.permissions?.has?.('ManageChannels')) return true;
@@ -151,7 +153,6 @@ export async function refreshQueueEmbed(
     msgId = msg.id;
   }
 
-  // Reset inactivity timer whenever embed is refreshed (player joined or left)
   if (inactivityMinutes && inactivityMinutes > 0) {
     resetInactivityTimer(queueId, channel.id, msgId, inactivityMinutes, channel);
   }
@@ -159,17 +160,16 @@ export async function refreshQueueEmbed(
   return msgId;
 }
 
-// ─── Queue full — trigger team vote ──────────────────────────────────────────
+// ─── Queue full — create private match channel, new queue, post team vote ────
 
 export async function handleQueueFull(
-  channel: any,
+  channel: any,           // main queue TextChannel
   queueId: string,
   teamSize: number,
   gameName: string,
   mmrEnabled: boolean,
   existingMessageId: string | null
 ) {
-  // Queue is full — stop both timers
   if (inactivityTimers.has(queueId)) {
     clearTimeout(inactivityTimers.get(queueId)!);
     inactivityTimers.delete(queueId);
@@ -178,31 +178,130 @@ export async function handleQueueFull(
 
   await supabase.from('eights_queues').update({ status: 'voting_teams' }).eq('id', queueId);
 
-  const { embed, rows } = buildTeamVoteEmbed({}, {});
+  const guild   = (channel as TextChannel).guild;
+  const guildId = guild.id;
 
-  let voteMsg: Message;
+  // Fetch config
+  const { data: config } = await supabase
+    .from('eights_channel_config')
+    .select('staff_role_id, lobby_vc_id, game_id, inactivity_minutes')
+    .eq('guild_id', guildId)
+    .eq('channel_id', (channel as TextChannel).id)
+    .single();
+
+  // Fetch players
+  const { data: players } = await supabase
+    .from('eights_queue_players')
+    .select('discord_id')
+    .eq('queue_id', queueId);
+  const playerIds = (players || []).map(p => p.discord_id as string);
+
+  // Pre-calculate match number
+  const { count: matchCount } = await supabase
+    .from('eights_matches')
+    .select('id', { count: 'exact', head: true })
+    .eq('guild_id', guildId);
+  const matchNumber = (matchCount || 0) + 1;
+
+  // Determine category for the private channel (from lobby VC or queue channel itself)
+  let categoryId: string | null = null;
+  const lobbyVcId = config?.lobby_vc_id ?? null;
+  if (lobbyVcId) {
+    const lobbyVc = guild.channels.cache.get(lobbyVcId);
+    if (lobbyVc?.parentId) categoryId = lobbyVc.parentId;
+  }
+  if (!categoryId) {
+    const queueCh = guild.channels.cache.get((channel as TextChannel).id);
+    if (queueCh?.parentId) categoryId = queueCh.parentId;
+  }
+
+  // Build permission overwrites for the private channel
+  const staffRoleId = config?.staff_role_id ?? null;
+  const permOverwrites: any[] = [
+    {
+      id:   guildId,
+      type: OverwriteType.Role,
+      deny: [PermissionFlagsBits.ViewChannel],
+    },
+    ...playerIds.map(id => ({
+      id,
+      type:  OverwriteType.Member,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+    })),
+  ];
+  if (staffRoleId) {
+    permOverwrites.push({
+      id:    staffRoleId,
+      type:  OverwriteType.Role,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+    });
+  }
+
+  // Create private text channel (fall back to main channel if bot lacks permission)
+  let privateChannel: TextChannel = channel;
+  try {
+    privateChannel = await guild.channels.create({
+      name:                 `match-${matchNumber}`,
+      type:                 ChannelType.GuildText,
+      parent:               categoryId || undefined,
+      permissionOverwrites: permOverwrites,
+    }) as TextChannel;
+  } catch (err) {
+    console.error('[queueFlow] Failed to create private match channel:', err);
+  }
+
+  // Edit main channel embed to show match in progress (no buttons)
   if (existingMessageId) {
     try {
       const old = await channel.messages.fetch(existingMessageId);
-      voteMsg = await old.edit({
-        content: `@here Queue is full! Vote for team selection — **${TEAM_VOTE_SECONDS}s**`,
-        embeds: [embed],
-        components: rows,
+      await old.edit({
+        content:    `⚔️ **Match #${matchNumber} is in progress**`,
+        embeds:     [],
+        components: [],
       });
-    } catch {
-      voteMsg = await channel.send({
-        content: `@here Queue is full! Vote for team selection — **${TEAM_VOTE_SECONDS}s**`,
-        embeds: [embed],
-        components: rows,
-      });
-    }
-  } else {
-    voteMsg = await channel.send({
-      content: `@here Queue is full! Vote for team selection — **${TEAM_VOTE_SECONDS}s**`,
-      embeds: [embed],
-      components: rows,
-    });
+    } catch {}
   }
+
+  // Create a fresh empty queue in the main channel so others can queue
+  const { data: origQueue } = await supabase
+    .from('eights_queues')
+    .select('game_id')
+    .eq('id', queueId)
+    .single();
+
+  const { data: newQueue } = await supabase
+    .from('eights_queues')
+    .insert({
+      guild_id:   guildId,
+      channel_id: (channel as TextChannel).id,
+      game_id:    origQueue?.game_id ?? config?.game_id,
+      team_size:  teamSize,
+      status:     'waiting',
+    })
+    .select('id')
+    .single();
+
+  if (newQueue) {
+    const newMsgId = await refreshQueueEmbed(
+      channel, newQueue.id, teamSize, gameName, mmrEnabled, null,
+      config?.inactivity_minutes ?? 60
+    );
+    if (newMsgId) {
+      await supabase.from('eights_queues').update({ message_id: newMsgId }).eq('id', newQueue.id);
+    }
+  }
+
+  // Post team vote in the private channel, @mentioning all 8 players
+  const mentions = playerIds.map(id => `<@${id}>`).join(' ');
+  const { embed, rows } = buildTeamVoteEmbed(queueId, {}, {});
+
+  const voteMsg = await privateChannel.send({
+    content:    `${mentions}\n\nQueue is full! Vote for team selection — **${TEAM_VOTE_SECONDS}s**`,
+    embeds:     [embed],
+    components: rows,
+  });
+
+  await supabase.from('eights_queues').update({ message_id: voteMsg.id }).eq('id', queueId);
 
   setTimeout(() => resolveTeamVote(queueId, teamSize, gameName, mmrEnabled, voteMsg), TEAM_VOTE_SECONDS * 1000);
 }
@@ -268,15 +367,14 @@ export async function handleJoinButton(interaction: ButtonInteraction) {
   const count = (players || []).length;
 
   const displayName = config.queue_name || gameName?.name || 'Queue';
-  const channel = interaction.channel as TextChannel;
-  const newMsgId = await refreshQueueEmbed(channel, queue.id, config.team_size, displayName, config.mmr_enabled, queue.message_id, config.inactivity_minutes ?? 60);
+  const ch          = interaction.channel as TextChannel;
+  const newMsgId    = await refreshQueueEmbed(ch, queue.id, config.team_size, displayName, config.mmr_enabled, queue.message_id, config.inactivity_minutes ?? 60);
   if (newMsgId && newMsgId !== queue.message_id) {
     await supabase.from('eights_queues').update({ message_id: newMsgId }).eq('id', queue.id);
   }
 
   await interaction.editReply({ content: `✅ You joined the queue! [${count}/${total}]` });
 
-  // First player joined — start the hard 15-min deadline
   if (count === 1) {
     startFirstJoinTimerForQueue({
       queueId:           queue.id,
@@ -293,7 +391,6 @@ export async function handleJoinButton(interaction: ButtonInteraction) {
   }
 
   if (count >= total) {
-    const ch = interaction.channel as TextChannel;
     await handleQueueFull(ch, queue.id, config.team_size, displayName, config.mmr_enabled, newMsgId || queue.message_id);
   }
 }
@@ -406,14 +503,15 @@ export async function handleCancelQueue(interaction: ButtonInteraction) {
 
 export async function handleTeamVoteButton(
   interaction: ButtonInteraction,
-  choice: 'random' | 'captains' | 'balanced' | 'unfair'
+  choice: 'random' | 'captains' | 'balanced' | 'unfair',
+  queueId: string
 ) {
   await interaction.deferUpdate();
   const discordId = interaction.user.id;
 
   const { data: queue } = await supabase
     .from('eights_queues').select('*')
-    .eq('channel_id', interaction.channelId)
+    .eq('id', queueId)
     .eq('status', 'voting_teams')
     .single();
 
@@ -433,7 +531,7 @@ export async function handleTeamVoteButton(
   await supabase.from('eights_queues').update({ team_vote: votes }).eq('id', queue.id);
 
   const mmrVotes: Record<string, string[]> = queue.mmr_vote || {};
-  const { embed, rows } = buildTeamVoteEmbed(votes, mmrVotes);
+  const { embed, rows } = buildTeamVoteEmbed(queue.id, votes, mmrVotes);
   await interaction.message.edit({ embeds: [embed], components: rows });
 
   await interaction.followUp({ content: `✅ Voted **${choice}**.`, ephemeral: true });
@@ -441,13 +539,17 @@ export async function handleTeamVoteButton(
 
 // ─── MMR vote buttons ─────────────────────────────────────────────────────────
 
-export async function handleMmrVoteButton(interaction: ButtonInteraction, choice: 'enable' | 'disable') {
+export async function handleMmrVoteButton(
+  interaction: ButtonInteraction,
+  choice: 'enable' | 'disable',
+  queueId: string
+) {
   await interaction.deferUpdate();
   const discordId = interaction.user.id;
 
   const { data: queue } = await supabase
     .from('eights_queues').select('*')
-    .eq('channel_id', interaction.channelId)
+    .eq('id', queueId)
     .eq('status', 'voting_teams')
     .single();
 
@@ -467,7 +569,7 @@ export async function handleMmrVoteButton(interaction: ButtonInteraction, choice
   await supabase.from('eights_queues').update({ mmr_vote: mmrVotes }).eq('id', queue.id);
 
   const teamVotes: Record<string, string[]> = queue.team_vote || {};
-  const { embed, rows } = buildTeamVoteEmbed(teamVotes, mmrVotes);
+  const { embed, rows } = buildTeamVoteEmbed(queue.id, teamVotes, mmrVotes);
   await interaction.message.edit({ embeds: [embed], components: rows });
 
   await interaction.followUp({ content: `✅ MMR vote: **${choice}**.`, ephemeral: true });
@@ -485,7 +587,6 @@ async function resolveTeamVote(
   const { data: queue } = await supabase.from('eights_queues').select('*').eq('id', queueId).single();
   if (!queue || queue.status !== 'voting_teams') return;
 
-  // Resolve team selection winner
   const votes: Record<string, string[]> = queue.team_vote || {};
   const counts = {
     random:   (votes['random']   || []).length,
@@ -496,19 +597,19 @@ async function resolveTeamVote(
   const max = Math.max(...Object.values(counts));
   let winner: 'random' | 'captains' | 'balanced' | 'unfair' = 'random';
   if (max > 0) {
-    if (counts.balanced === max)  winner = 'balanced';
-    else if (counts.captains === max) winner = 'captains';
-    else if (counts.unfair === max)   winner = 'unfair';
+    if (counts.balanced === max)       winner = 'balanced';
+    else if (counts.captains === max)  winner = 'captains';
+    else if (counts.unfair === max)    winner = 'unfair';
   }
 
-  // Resolve MMR toggle vote
   const mmrVotes: Record<string, string[]> = queue.mmr_vote || {};
   const mmrEnabled = (mmrVotes['disable'] || []).length > (mmrVotes['enable'] || []).length
     ? false
     : mmrEnabledDefault;
 
+  // Mark queue as in_progress to prevent late votes from firing again
   await supabase.from('eights_queues').update({
-    status: 'voting_map',
+    status:                'in_progress',
     chosen_team_selection: winner,
   }).eq('id', queueId);
 
@@ -518,12 +619,11 @@ async function resolveTeamVote(
 
   if (!players) return;
 
-  const mmrMap = Object.fromEntries(players.map(p => [p.discord_id, p.mmr_at_queue_time ?? MMR_START]));
+  const mmrMap    = Object.fromEntries(players.map(p => [p.discord_id, p.mmr_at_queue_time ?? MMR_START]));
   const playerObjs = players.map(p => ({ discord_id: p.discord_id, profile_id: p.profile_id }));
 
   if (winner === 'captains') {
-    const channel = voteMsg.channel;
-    await startCaptainDraft(queue, playerObjs, mmrEnabled, channel, voteMsg);
+    await startCaptainDraft(queue, playerObjs, mmrEnabled, voteMsg.channel, voteMsg);
     return;
   }
 
@@ -542,83 +642,14 @@ async function resolveTeamVote(
     team2 = shuffled.slice(teamSize);
   }
 
-  const pool = await getMapPool(queue.game_id);
-  const mapOptions = pickRandomMaps(pool, 4);
+  // Random map pick — no vote
+  const pool   = await getMapPool(queue.game_id);
+  const maps   = pickRandomMaps(pool, 1);
+  const chosen = maps[0];
+  const mapName  = chosen?.name     || 'TBD';
+  const modeName = chosen?.modeName || 'TBD';
 
-  if (mapOptions.length === 0) {
-    await startMatchFromTeams(queueId, team1, team2, 'TBD', 'TBD', winner, voteMsg);
-    return;
-  }
-
-  await supabase.from('eights_queues').update({
-    map_options: mapOptions,
-    status: 'voting_map',
-    captain_teams: { team1, team2 },
-  }).eq('id', queueId);
-
-  const { embed: mapEmbed, row: mapRow } = buildMapVoteEmbed(mapOptions);
-  await voteMsg.edit({
-    content: `🗺️ Team selection: **${winner}**! Now vote for the map — **${MAP_VOTE_SECONDS}s**`,
-    embeds: [mapEmbed],
-    components: [mapRow],
-  });
-
-  setTimeout(() => resolveCaptainMapVote(queueId, team1, team2, mapOptions, voteMsg), MAP_VOTE_SECONDS * 1000);
-}
-
-// ─── Map vote button ──────────────────────────────────────────────────────────
-
-export async function handleMapVoteButton(interaction: ButtonInteraction, mapId: string) {
-  await interaction.deferUpdate();
-  const discordId = interaction.user.id;
-
-  const { data: queue } = await supabase
-    .from('eights_queues').select('*')
-    .eq('channel_id', interaction.channelId)
-    .eq('status', 'voting_map')
-    .single();
-
-  if (!queue) return;
-
-  const { data: player } = await supabase
-    .from('eights_queue_players').select('id')
-    .eq('queue_id', queue.id).eq('discord_id', discordId).single();
-
-  if (!player) return interaction.followUp({ content: '❌ You\'re not in this queue.', ephemeral: true });
-
-  const mapVotes: Record<string, string[]> = queue.map_vote || {};
-  for (const key of Object.keys(mapVotes)) mapVotes[key] = mapVotes[key].filter((id: string) => id !== discordId);
-  if (!mapVotes[mapId]) mapVotes[mapId] = [];
-  mapVotes[mapId].push(discordId);
-
-  await supabase.from('eights_queues').update({ map_vote: mapVotes }).eq('id', queue.id);
-  await interaction.followUp({ content: '✅ Map vote recorded.', ephemeral: true });
-}
-
-// ─── Resolve map vote (shared between random/balanced/unfair + captain paths) ─
-
-export async function resolveCaptainMapVote(
-  queueId: string,
-  team1: any[],
-  team2: any[],
-  mapOptions: Array<{ id: string; name: string; mode: string; modeName: string }>,
-  voteMsg: Message
-) {
-  const { data: fresh } = await supabase.from('eights_queues').select('*').eq('id', queueId).single();
-  if (!fresh || fresh.status !== 'voting_map') return;
-
-  const votes: Record<string, string[]> = fresh.map_vote || {};
-  let chosenMapId = mapOptions[0]?.id;
-  let maxVotes = -1;
-  for (const [mapId, voters] of Object.entries(votes)) {
-    if ((voters as string[]).length > maxVotes) {
-      maxVotes = (voters as string[]).length;
-      chosenMapId = mapId;
-    }
-  }
-
-  const chosenMap = mapOptions.find(m => m.id === chosenMapId);
-  await startMatchFromTeams(queueId, team1, team2, chosenMap?.name || 'TBD', chosenMap?.modeName || 'TBD', fresh.chosen_team_selection || 'random', voteMsg);
+  await startMatchFromTeams(queueId, team1, team2, mapName, modeName, winner, voteMsg);
 }
 
 // ─── Start match (shared entry point) ────────────────────────────────────────
@@ -630,18 +661,19 @@ export async function startMatchFromTeams(
   map: string,
   mode: string,
   teamSelection: string,
-  voteMsg: Message
+  voteMsg: Message,
+  captain1Name?: string,
+  captain2Name?: string
 ) {
   const { data: queue } = await supabase.from('eights_queues').select('*').eq('id', queueId).single();
   if (!queue) return;
 
   await supabase.from('eights_queues').update({
-    status: 'in_progress',
-    chosen_map: map,
+    status:      'in_progress',
+    chosen_map:  map,
     chosen_mode: mode,
   }).eq('id', queueId);
 
-  // Get next match number for this guild
   const { count } = await supabase
     .from('eights_matches')
     .select('id', { count: 'exact', head: true })
@@ -649,15 +681,16 @@ export async function startMatchFromTeams(
   const matchNumber = (count || 0) + 1;
 
   const { data: match } = await supabase.from('eights_matches').insert({
-    queue_id:       queueId,
-    guild_id:       queue.guild_id,
-    channel_id:     queue.channel_id,
-    game_id:        queue.game_id,
+    queue_id:        queueId,
+    guild_id:        queue.guild_id,
+    channel_id:      queue.channel_id,
+    game_id:         queue.game_id,
     map,
     mode,
-    team_selection: teamSelection,
-    status:         'in_progress',
-    match_number:   matchNumber,
+    team_selection:  teamSelection,
+    status:          'in_progress',
+    match_number:    matchNumber,
+    text_channel_id: voteMsg.channelId,
   }).select().single();
 
   if (!match) return;
@@ -671,14 +704,14 @@ export async function startMatchFromTeams(
   const team1Tags = team1.map(p => `<@${p.discord_id}>`);
   const team2Tags = team2.map(p => `<@${p.discord_id}>`);
 
-  const { embed, row } = buildMatchEmbed(team1Tags, team2Tags, map, mode, teamSelection, matchNumber);
-  await voteMsg.edit({ content: '⚔️ Match is live!', embeds: [embed], components: [row] });
+  const { embed, row } = buildMatchEmbed(team1Tags, team2Tags, map, mode, teamSelection, matchNumber, captain1Name, captain2Name);
+  await voteMsg.edit({ content: '⚔️ Match is live! GL HF', embeds: [embed], components: [row] });
   await supabase.from('eights_matches').update({ message_id: voteMsg.id }).eq('id', match.id);
 
   // ── VC Management ─────────────────────────────────────────────────────────
   const { data: vcConfig } = await supabase
     .from('eights_channel_config')
-    .select('lobby_vc_id, vc_join_minutes, mmr_enabled, queue_name, inactivity_minutes')
+    .select('lobby_vc_id, vc_join_minutes, mmr_enabled, queue_name, inactivity_minutes, staff_role_id')
     .eq('guild_id', queue.guild_id).eq('channel_id', queue.channel_id).single();
 
   const vcJoinMinutes = vcConfig?.vc_join_minutes ?? 0;
@@ -694,23 +727,23 @@ export async function startMatchFromTeams(
     const vcGameId        = queue.game_id as string;
 
     await startVcPhase({
-      guild:          voteMsg.guild,
-      matchId:        match.id,
+      guild:                 voteMsg.guild,
+      matchId:               match.id,
       queueId,
-      queueChannelId: vcChannelId,
-      guildId:        vcGuildId,
+      queueChannelId:        vcChannelId,
+      announcementChannelId: voteMsg.channelId,  // private match channel
+      guildId:               vcGuildId,
       teamSize,
       gameName,
       mmrEnabled,
-      gameId:         vcGameId,
-      team1Ids:       team1.map(p => p.discord_id),
-      team2Ids:       team2.map(p => p.discord_id),
-      lobbyVcId:      vcConfig?.lobby_vc_id ?? null,
+      gameId:                vcGameId,
+      team1Ids:              team1.map(p => p.discord_id),
+      team2Ids:              team2.map(p => p.discord_id),
+      lobbyVcId:             vcConfig?.lobby_vc_id ?? null,
+      staffRoleId:           vcConfig?.staff_role_id ?? null,
       vcJoinMinutes,
-      // Re-queue only the players who showed up; start the 15-min timer so the partial queue
-      // can expire if no replacement joins in time.
-      onRequeue: async (newQueueId: string, presentIds: string[], channel: any) => {
-        const msgId = await refreshQueueEmbed(channel, newQueueId, teamSize, gameName, mmrEnabled, null, inactivityMins);
+      onRequeue: async (newQueueId: string, presentIds: string[], ch: any) => {
+        const msgId = await refreshQueueEmbed(ch, newQueueId, teamSize, gameName, mmrEnabled, null, inactivityMins);
         if (msgId) await supabase.from('eights_queues').update({ message_id: msgId }).eq('id', newQueueId);
         if (presentIds.length > 0) {
           startFirstJoinTimerForQueue({
@@ -759,10 +792,10 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
     .from('eights_match_players').select('voted_winner, team, discord_id')
     .eq('match_id', match.id);
 
-  const total     = (allVotes || []).length;
-  const majority  = Math.floor(total / 2) + 1;
-  const t1Votes   = (allVotes || []).filter(v => v.voted_winner === 1).length;
-  const t2Votes   = (allVotes || []).filter(v => v.voted_winner === 2).length;
+  const total    = (allVotes || []).length;
+  const majority = Math.floor(total / 2) + 1;
+  const t1Votes  = (allVotes || []).filter(v => v.voted_winner === 1).length;
+  const t2Votes  = (allVotes || []).filter(v => v.voted_winner === 2).length;
 
   if (t1Votes >= majority || t2Votes >= majority) {
     const winner = t1Votes >= majority ? 1 : 2;
@@ -772,11 +805,6 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
       winner_team:  winner,
       completed_at: new Date().toISOString(),
     }).eq('id', match.id);
-
-    // Disable result buttons
-    try {
-      await interaction.message.edit({ components: [] });
-    } catch { /* ignore */ }
 
     // Apply MMR
     const { data: config } = await supabase
@@ -789,7 +817,6 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
       deltas = await applyMmrAfterMatch(match.id, match.guild_id, winner as 1 | 2);
     }
 
-    // Fetch team tags for winner card
     const team1Players = (allVotes || []).filter(v => v.team === 1).map(v => `<@${v.discord_id}>`);
     const team2Players = (allVotes || []).filter(v => v.team === 2).map(v => `<@${v.discord_id}>`);
 
@@ -804,21 +831,39 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
       mmrEnabled
     );
 
-    // Post to results channel if configured, otherwise post in current channel
+    // Post winner to results channel if configured, else the main queue channel
     const resultsChannelId = config?.results_channel_id ?? null;
-    if (resultsChannelId && resultsChannelId !== match.channel_id) {
-      try {
-        const resultsChannel = await interaction.client.channels.fetch(resultsChannelId) as any;
-        if (resultsChannel && 'send' in resultsChannel) {
-          await resultsChannel.send({ embeds: [winEmbed] });
-          await interaction.followUp({ content: `🏆 Result posted to <#${resultsChannelId}>!`, ephemeral: true });
-        }
-      } catch {
-        await interaction.followUp({ embeds: [winEmbed] });
+    const targetChId = (resultsChannelId && resultsChannelId !== match.channel_id)
+      ? resultsChannelId
+      : match.channel_id;
+
+    try {
+      const targetCh = await interaction.client.channels.fetch(targetChId) as any;
+      if (targetCh && 'send' in targetCh) {
+        await targetCh.send({ embeds: [winEmbed] });
       }
-    } else {
-      await interaction.followUp({ embeds: [winEmbed] });
+    } catch (err) {
+      console.error('[handleResultButton] Could not post winner embed:', err);
     }
+
+    // Delete private match text channel (if it's different from the main queue channel)
+    const textChId = match.text_channel_id;
+    if (textChId && textChId !== match.channel_id) {
+      try {
+        const ch = await interaction.client.channels.fetch(textChId);
+        if (ch) await (ch as any).delete('Match completed').catch(() => {});
+      } catch {}
+    }
+
+    // Delete team VCs stored as "team1VcId,team2VcId"
+    const vcIds = (match.voice_channel_id || '').split(',').filter(Boolean);
+    for (const vcId of vcIds) {
+      try {
+        const ch = await interaction.client.channels.fetch(vcId);
+        if (ch) await (ch as any).delete('Match completed').catch(() => {});
+      } catch {}
+    }
+
   } else {
     await interaction.followUp({
       content: `✅ Vote recorded. [T1: ${t1Votes} | T2: ${t2Votes}] — need ${majority} to confirm.`,
