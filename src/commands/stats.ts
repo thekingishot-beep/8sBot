@@ -1,45 +1,76 @@
-import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
+import { ChatInputCommandInteraction } from 'discord.js';
 import { supabase } from '../supabase';
+import { getPlayerMmr, getPlayerRank } from '../mmr';
+import { buildStatsEmbed } from '../queueEmbed';
 
 export async function handleStats(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply({ ephemeral: false });
 
   const targetUser = interaction.options.getUser('player') ?? interaction.user;
   const discordId  = targetUser.id;
+  const guildId    = interaction.guildId!;
 
-  // Find linked ScrimCenter profile
   const { data: profile } = await supabase
-    .from('profiles')
-    .select('id, username, display_name')
-    .eq('discord_id', discordId)
-    .single();
+    .from('profiles').select('id, username, display_name')
+    .eq('discord_id', discordId).single();
 
-  // Pull all match_player rows for this discord user
+  const displayName = profile?.display_name || profile?.username || targetUser.displayName;
+
+  // Pull match history
   const { data: matchPlayers } = await supabase
     .from('eights_match_players')
-    .select('team, match_id, eights_matches(winner_team, status, map, mode, created_at)')
-    .eq('discord_id', discordId);
+    .select('team, match_id, eights_matches!inner(winner_team, status, map, mode, created_at, guild_id)')
+    .eq('discord_id', discordId)
+    .eq('eights_matches.guild_id', guildId)
+    .eq('eights_matches.status', 'completed')
+    .order('created_at', { referencedTable: 'eights_matches', ascending: false });
 
-  const completed = ((matchPlayers || []) as any[]).filter(mp => mp.eights_matches?.status === 'completed');
+  const completed = (matchPlayers || []) as any[];
   const wins   = completed.filter(mp => mp.team === mp.eights_matches?.winner_team).length;
   const losses = completed.length - wins;
-  const winRate = completed.length > 0 ? Math.round((wins / completed.length) * 100) : 0;
 
-  const displayName = profile?.display_name || profile?.username || targetUser.username;
+  // Pull MMR history for recent games
+  const { data: mmrHistory } = await supabase
+    .from('eights_mmr_history')
+    .select('won, delta, created_at')
+    .eq('discord_id', discordId)
+    .eq('guild_id', guildId)
+    .order('created_at', { ascending: false })
+    .limit(6);
 
-  const embed = new EmbedBuilder()
-    .setTitle(`📊 8sBot Stats — ${displayName}`)
-    .setColor(0x3B82F6)
-    .setThumbnail(targetUser.displayAvatarURL())
-    .addFields(
-      { name: 'Matches',  value: String(completed.length), inline: true },
-      { name: 'Wins',     value: String(wins),             inline: true },
-      { name: 'Losses',   value: String(losses),           inline: true },
-      { name: 'Win Rate', value: `${winRate}%`,            inline: true },
-    );
+  const recentGames = (mmrHistory || []).map(h => ({
+    won:       h.won,
+    delta:     h.delta,
+    createdAt: h.created_at,
+  }));
+
+  // MMR + rank
+  const { data: config } = await supabase
+    .from('eights_channel_config').select('mmr_enabled, game_id')
+    .eq('guild_id', guildId).limit(1).single();
+  const mmrEnabled = config?.mmr_enabled ?? true;
+
+  const mmr  = await getPlayerMmr(discordId, guildId);
+  const rank = await getPlayerRank(discordId, guildId);
+
+  const { data: gameRow } = config?.game_id
+    ? await supabase.from('games').select('name').eq('id', config.game_id).single()
+    : { data: null };
+
+  const embed = buildStatsEmbed(
+    displayName,
+    targetUser.displayAvatarURL(),
+    mmr,
+    rank,
+    wins,
+    losses,
+    recentGames,
+    mmrEnabled,
+    gameRow?.name
+  );
 
   if (!profile) {
-    embed.setFooter({ text: '⚠️ Discord not linked to a ScrimCenter account — stats may be incomplete.' });
+    embed.setFooter({ text: '⚠️ Not linked to a ScrimCenter account — link Discord in your profile for full tracking.' });
   }
 
   await interaction.editReply({ embeds: [embed] });

@@ -24,7 +24,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('leaderboard')
-    .setDescription('Show the top 10 players by win rate'),
+    .setDescription('Show the MMR leaderboard'),
 
   new SlashCommandBuilder()
     .setName('8s-setup')
