@@ -28,16 +28,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('8s-setup')
-    .setDescription('Configure a channel for 8sBot (Admin only)')
-    .addChannelOption(opt =>
-      opt.setName('channel').setDescription('Channel to enable the queue in').setRequired(true)
-    )
-    .addStringOption(opt =>
-      opt.setName('game_id').setDescription('Game ID from ScrimCenter (leave blank for default)').setRequired(false)
-    )
-    .addIntegerOption(opt =>
-      opt.setName('team_size').setDescription('Players per team (default: 4)').setRequired(false).setMinValue(1).setMaxValue(8)
-    ),
+    .setDescription('Configure a channel for 8sBot (Admin only)'),
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN!);
