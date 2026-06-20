@@ -29,6 +29,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('8s-setup')
     .setDescription('Configure a channel for 8sBot (Admin only)'),
+
+  new SlashCommandBuilder()
+    .setName('8s-remove')
+    .setDescription('Remove 8sBot configuration from this channel (Admin only)'),
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN!);

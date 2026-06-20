@@ -21,6 +21,44 @@ import { startCaptainDraft } from './captainFlow';
 const TEAM_VOTE_SECONDS = 30;
 const MAP_VOTE_SECONDS  = 60;
 
+// ─── Inactivity timer map (queueId → timer handle) ───────────────────────────
+const inactivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function resetInactivityTimer(queueId: string, channelId: string, messageId: string | null, inactivityMinutes: number, channel: any) {
+  if (inactivityTimers.has(queueId)) clearTimeout(inactivityTimers.get(queueId)!);
+
+  const timer = setTimeout(async () => {
+    inactivityTimers.delete(queueId);
+
+    // Only fire if queue is still waiting
+    const { data: queue } = await supabase.from('eights_queues').select('status').eq('id', queueId).single();
+    if (!queue || queue.status !== 'waiting') return;
+
+    await supabase.from('eights_queues').update({ status: 'cancelled' }).eq('id', queueId);
+
+    if (messageId) {
+      try {
+        const msg = await channel.messages.fetch(messageId);
+        await msg.edit({
+          content: `⏱️ **Queue emptied due to ${inactivityMinutes} minutes of inactivity.**\nRe-enter the queue if you are still looking to play!`,
+          embeds: [],
+          components: [],
+        });
+      } catch { /* message gone */ }
+    }
+  }, inactivityMinutes * 60 * 1000);
+
+  inactivityTimers.set(queueId, timer);
+}
+
+// Helper: check if user is staff (has configured role OR ManageChannels permission)
+function isStaff(interaction: ButtonInteraction, staffRoleId: string | null): boolean {
+  const member = interaction.member as any;
+  if (member?.permissions?.has?.('ManageChannels')) return true;
+  if (staffRoleId && member?.roles?.cache?.has?.(staffRoleId)) return true;
+  return false;
+}
+
 // ─── Shared helper: refresh the queue embed in the channel ───────────────────
 
 export async function refreshQueueEmbed(
@@ -29,7 +67,8 @@ export async function refreshQueueEmbed(
   teamSize: number,
   gameName: string,
   mmrEnabled: boolean,
-  existingMessageId?: string | null
+  existingMessageId?: string | null,
+  inactivityMinutes?: number
 ): Promise<string | null> {
   const { data: players } = await supabase
     .from('eights_queue_players')
@@ -43,16 +82,26 @@ export async function refreshQueueEmbed(
 
   const { embed, row } = buildQueueEmbed(playerList, teamSize, gameName, mmrEnabled);
 
+  let msgId: string | null = null;
   if (existingMessageId) {
     try {
       const msg = await channel.messages.fetch(existingMessageId);
       await msg.edit({ embeds: [embed], components: [row] });
-      return existingMessageId;
+      msgId = existingMessageId;
     } catch { /* message deleted — fall through to send */ }
   }
 
-  const msg = await channel.send({ embeds: [embed], components: [row] });
-  return msg.id;
+  if (!msgId) {
+    const msg = await channel.send({ embeds: [embed], components: [row] });
+    msgId = msg.id;
+  }
+
+  // Reset inactivity timer whenever embed is refreshed (player joined or left)
+  if (inactivityMinutes && inactivityMinutes > 0) {
+    resetInactivityTimer(queueId, channel.id, msgId, inactivityMinutes, channel);
+  }
+
+  return msgId;
 }
 
 // ─── Queue full — trigger team vote ──────────────────────────────────────────
@@ -65,6 +114,12 @@ export async function handleQueueFull(
   mmrEnabled: boolean,
   existingMessageId: string | null
 ) {
+  // Queue is full — stop inactivity timer
+  if (inactivityTimers.has(queueId)) {
+    clearTimeout(inactivityTimers.get(queueId)!);
+    inactivityTimers.delete(queueId);
+  }
+
   await supabase.from('eights_queues').update({ status: 'voting_teams' }).eq('id', queueId);
 
   const { embed, rows } = buildTeamVoteEmbed({}, {});
@@ -157,7 +212,7 @@ export async function handleJoinButton(interaction: ButtonInteraction) {
   const count = (players || []).length;
 
   const channel = interaction.channel as TextChannel;
-  const newMsgId = await refreshQueueEmbed(channel, queue.id, config.team_size, gameName?.name || 'Queue', config.mmr_enabled, queue.message_id);
+  const newMsgId = await refreshQueueEmbed(channel, queue.id, config.team_size, gameName?.name || 'Queue', config.mmr_enabled, queue.message_id, config.inactivity_minutes ?? 60);
   if (newMsgId && newMsgId !== queue.message_id) {
     await supabase.from('eights_queues').update({ message_id: newMsgId }).eq('id', queue.id);
   }
@@ -197,7 +252,7 @@ export async function handleLeaveButton(interaction: ButtonInteraction) {
     .eq('guild_id', interaction.guildId!).eq('channel_id', interaction.channelId).single();
 
   const ch = interaction.channel as TextChannel;
-  await refreshQueueEmbed(ch, queue.id, queue.team_size, gameName?.name || 'Queue', config?.mmr_enabled ?? true, queue.message_id);
+  await refreshQueueEmbed(ch, queue.id, queue.team_size, gameName?.name || 'Queue', config?.mmr_enabled ?? true, queue.message_id, config?.inactivity_minutes ?? 60);
 
   await interaction.editReply({ content: '✅ You left the queue.' });
 }
@@ -207,9 +262,11 @@ export async function handleLeaveButton(interaction: ButtonInteraction) {
 export async function handleForceStart(interaction: ButtonInteraction) {
   await interaction.deferReply({ ephemeral: true });
 
-  const member = interaction.member as any;
-  const hasPerms = member?.permissions?.has?.('ManageChannels');
-  if (!hasPerms) return interaction.editReply({ content: '❌ Only staff can force start.' });
+  const { data: cfg } = await supabase.from('eights_channel_config').select('staff_role_id')
+    .eq('guild_id', interaction.guildId!).eq('channel_id', interaction.channelId).single();
+  if (!isStaff(interaction, cfg?.staff_role_id ?? null)) {
+    return interaction.editReply({ content: '❌ Only staff can force start.' });
+  }
 
   const { data: queue } = await supabase
     .from('eights_queues').select('*')
@@ -240,9 +297,11 @@ export async function handleForceStart(interaction: ButtonInteraction) {
 export async function handleCancelQueue(interaction: ButtonInteraction) {
   await interaction.deferReply({ ephemeral: true });
 
-  const member = interaction.member as any;
-  const hasPerms = member?.permissions?.has?.('ManageChannels');
-  if (!hasPerms) return interaction.editReply({ content: '❌ Only staff can cancel the queue.' });
+  const { data: cfg } = await supabase.from('eights_channel_config').select('staff_role_id')
+    .eq('guild_id', interaction.guildId!).eq('channel_id', interaction.channelId).single();
+  if (!isStaff(interaction, cfg?.staff_role_id ?? null)) {
+    return interaction.editReply({ content: '❌ Only staff can cancel the queue.' });
+  }
 
   const { data: queue } = await supabase
     .from('eights_queues').select('*')
@@ -588,7 +647,7 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
 
     // Apply MMR
     const { data: config } = await supabase
-      .from('eights_channel_config').select('mmr_enabled')
+      .from('eights_channel_config').select('mmr_enabled, results_channel_id')
       .eq('guild_id', match.guild_id).eq('channel_id', match.channel_id).single();
     const mmrEnabled = config?.mmr_enabled ?? true;
 
@@ -612,7 +671,21 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
       mmrEnabled
     );
 
-    await interaction.followUp({ embeds: [winEmbed] });
+    // Post to results channel if configured, otherwise post in current channel
+    const resultsChannelId = config?.results_channel_id ?? null;
+    if (resultsChannelId && resultsChannelId !== match.channel_id) {
+      try {
+        const resultsChannel = await interaction.client.channels.fetch(resultsChannelId) as any;
+        if (resultsChannel && 'send' in resultsChannel) {
+          await resultsChannel.send({ embeds: [winEmbed] });
+          await interaction.followUp({ content: `🏆 Result posted to <#${resultsChannelId}>!`, ephemeral: true });
+        }
+      } catch {
+        await interaction.followUp({ embeds: [winEmbed] });
+      }
+    } else {
+      await interaction.followUp({ embeds: [winEmbed] });
+    }
   } else {
     await interaction.followUp({
       content: `✅ Vote recorded. [T1: ${t1Votes} | T2: ${t2Votes}] — need ${majority} to confirm.`,

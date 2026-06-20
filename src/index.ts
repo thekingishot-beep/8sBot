@@ -21,11 +21,13 @@ import { handleCaptainPickButton } from './captainFlow';
 import {
   handleSetupCommand,
   handleSetupChannelSelect,
+  handleSetupResultsChannelSelect,
   handleSetupGameSelect,
   handleSetupSizeSelect,
   handleSetupSave,
   handleSetupCancel,
 } from './setupFlow';
+import { handleRemoveCommand } from './removeFlow';
 
 const client = new Client({
   intents: [
@@ -50,6 +52,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       if (commandName === 'stats')       return await handleStats(interaction);
       if (commandName === 'leaderboard') return await handleLeaderboard(interaction);
       if (commandName === '8s-setup')    return await handleSetupCommand(interaction);
+      if (commandName === '8s-remove')   return await handleRemoveCommand(interaction);
     } catch (err) {
       console.error(`Error in /${commandName}:`, err);
       const msg = { content: '❌ Something went wrong. Try again.', ephemeral: true };
@@ -61,7 +64,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
   // ── Select menus ────────────────────────────────────────────────────────────
   if (interaction.isChannelSelectMenu()) {
-    if (interaction.customId === 'setup_channel') return await handleSetupChannelSelect(interaction);
+    if (interaction.customId === 'setup_channel')         return await handleSetupChannelSelect(interaction);
+    if (interaction.customId === 'setup_results_channel') return await handleSetupResultsChannelSelect(interaction);
     return;
   }
 
