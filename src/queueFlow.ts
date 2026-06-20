@@ -17,12 +17,22 @@ import {
   MMR_START,
 } from './mmr';
 import { startCaptainDraft } from './captainFlow';
+import { startVcPhase } from './vcFlow';
 
-const TEAM_VOTE_SECONDS = 30;
-const MAP_VOTE_SECONDS  = 60;
+const TEAM_VOTE_SECONDS  = 30;
+const MAP_VOTE_SECONDS   = 60;
+const FIRST_JOIN_MINUTES = 15;
 
-// ─── Inactivity timer map (queueId → timer handle) ───────────────────────────
+// ─── Inactivity timer map (queueId → timer) — resets on every join/leave ─────
 const inactivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// ─── First-join timer map (queueId → timer) — hard 15-min deadline from T=0 ─
+const firstJoinTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearFirstJoinTimer(queueId: string) {
+  const handle = firstJoinTimers.get(queueId);
+  if (handle) { clearTimeout(handle); firstJoinTimers.delete(queueId); }
+}
 
 function resetInactivityTimer(queueId: string, channelId: string, messageId: string | null, inactivityMinutes: number, channel: any) {
   if (inactivityTimers.has(queueId)) clearTimeout(inactivityTimers.get(queueId)!);
@@ -114,11 +124,12 @@ export async function handleQueueFull(
   mmrEnabled: boolean,
   existingMessageId: string | null
 ) {
-  // Queue is full — stop inactivity timer
+  // Queue is full — stop both timers
   if (inactivityTimers.has(queueId)) {
     clearTimeout(inactivityTimers.get(queueId)!);
     inactivityTimers.delete(queueId);
   }
+  clearFirstJoinTimer(queueId);
 
   await supabase.from('eights_queues').update({ status: 'voting_teams' }).eq('id', queueId);
 
@@ -211,17 +222,74 @@ export async function handleJoinButton(interaction: ButtonInteraction) {
     .from('eights_queue_players').select('discord_id').eq('queue_id', queue.id);
   const count = (players || []).length;
 
+  const displayName = config.queue_name || gameName?.name || 'Queue';
   const channel = interaction.channel as TextChannel;
-  const newMsgId = await refreshQueueEmbed(channel, queue.id, config.team_size, gameName?.name || 'Queue', config.mmr_enabled, queue.message_id, config.inactivity_minutes ?? 60);
+  const newMsgId = await refreshQueueEmbed(channel, queue.id, config.team_size, displayName, config.mmr_enabled, queue.message_id, config.inactivity_minutes ?? 60);
   if (newMsgId && newMsgId !== queue.message_id) {
     await supabase.from('eights_queues').update({ message_id: newMsgId }).eq('id', queue.id);
   }
 
   await interaction.editReply({ content: `✅ You joined the queue! [${count}/${total}]` });
 
+  // First player joined — start the hard 15-min deadline
+  if (count === 1) {
+    clearFirstJoinTimer(queue.id); // clear any stale timer from a previous cycle
+    const fjClient        = interaction.client;
+    const fjQueueId       = queue.id;
+    const fjChannelId     = channelId;
+    const fjGuildId       = guildId;
+    const fjGameId        = config.game_id;
+    const fjTeamSize      = config.team_size;
+    const fjDisplayName   = displayName;
+    const fjMmrEnabled    = config.mmr_enabled;
+    const fjInactivity    = config.inactivity_minutes ?? 60;
+    const fjMsgId         = newMsgId || queue.message_id;
+
+    const handle = setTimeout(async () => {
+      firstJoinTimers.delete(fjQueueId);
+      const { data: q } = await supabase.from('eights_queues').select('status, message_id').eq('id', fjQueueId).single();
+      if (!q || q.status !== 'waiting') return; // already filled or cancelled
+
+      // Cancel the timed-out queue
+      await supabase.from('eights_queues').update({ status: 'cancelled' }).eq('id', fjQueueId);
+      await supabase.from('eights_queue_players').delete().eq('queue_id', fjQueueId);
+      clearFirstJoinTimer(fjQueueId);
+      if (inactivityTimers.has(fjQueueId)) {
+        clearTimeout(inactivityTimers.get(fjQueueId)!);
+        inactivityTimers.delete(fjQueueId);
+      }
+
+      try {
+        const ch = await fjClient.channels.fetch(fjChannelId) as TextChannel;
+        // Edit old embed to show it expired
+        const msgId = q.message_id || fjMsgId;
+        if (msgId) {
+          const old = await ch.messages.fetch(msgId).catch(() => null);
+          if (old) await old.edit({ content: `⌛ Queue expired — no match found in ${FIRST_JOIN_MINUTES} minutes.`, embeds: [], components: [] }).catch(() => {});
+        }
+        // Create fresh waiting queue + post new embed so the channel stays active
+        const { data: newQ } = await supabase.from('eights_queues').insert({
+          guild_id:  fjGuildId,
+          channel_id: fjChannelId,
+          game_id:   fjGameId,
+          team_size: fjTeamSize,
+          status:    'waiting',
+        }).select('id').single();
+        if (newQ) {
+          const freshMsgId = await refreshQueueEmbed(ch, newQ.id, fjTeamSize, fjDisplayName, fjMmrEnabled, null, fjInactivity);
+          if (freshMsgId) await supabase.from('eights_queues').update({ message_id: freshMsgId }).eq('id', newQ.id);
+        }
+      } catch (err) {
+        console.error('[firstJoinTimer] Error resetting queue:', err);
+      }
+    }, FIRST_JOIN_MINUTES * 60 * 1000);
+
+    firstJoinTimers.set(queue.id, handle);
+  }
+
   if (count >= total) {
     const ch = interaction.channel as TextChannel;
-    await handleQueueFull(ch, queue.id, config.team_size, gameName?.name || 'Queue', config.mmr_enabled, newMsgId || queue.message_id);
+    await handleQueueFull(ch, queue.id, config.team_size, displayName, config.mmr_enabled, newMsgId || queue.message_id);
   }
 }
 
@@ -313,6 +381,11 @@ export async function handleCancelQueue(interaction: ButtonInteraction) {
   if (!queue) return interaction.editReply({ content: '❌ No waiting queue to cancel.' });
 
   await supabase.from('eights_queues').update({ status: 'cancelled' }).eq('id', queue.id);
+  clearFirstJoinTimer(queue.id);
+  if (inactivityTimers.has(queue.id)) {
+    clearTimeout(inactivityTimers.get(queue.id)!);
+    inactivityTimers.delete(queue.id);
+  }
 
   if (queue.message_id) {
     try {
@@ -596,6 +669,38 @@ export async function startMatchFromTeams(
   const { embed, row } = buildMatchEmbed(team1Tags, team2Tags, map, mode, teamSelection, matchNumber);
   await voteMsg.edit({ content: '⚔️ Match is live!', embeds: [embed], components: [row] });
   await supabase.from('eights_matches').update({ message_id: voteMsg.id }).eq('id', match.id);
+
+  // ── VC Management ─────────────────────────────────────────────────────────
+  const { data: vcConfig } = await supabase
+    .from('eights_channel_config')
+    .select('lobby_vc_id, vc_join_minutes, mmr_enabled, queue_name')
+    .eq('guild_id', queue.guild_id).eq('channel_id', queue.channel_id).single();
+
+  const vcJoinMinutes = vcConfig?.vc_join_minutes ?? 0;
+  if (vcJoinMinutes > 0 && voteMsg.guild) {
+    const { data: gameRow } = await supabase.from('games').select('name').eq('id', queue.game_id).single();
+    const gameName  = vcConfig?.queue_name || gameRow?.name || 'Queue';
+    const mmrEnabled = vcConfig?.mmr_enabled ?? true;
+    const teamSize   = queue.team_size as number;
+
+    await startVcPhase({
+      guild:          voteMsg.guild,
+      matchId:        match.id,
+      queueId,
+      queueChannelId: queue.channel_id,
+      guildId:        queue.guild_id,
+      teamSize,
+      gameName,
+      mmrEnabled,
+      gameId:         queue.game_id,
+      team1Ids:       team1.map(p => p.discord_id),
+      team2Ids:       team2.map(p => p.discord_id),
+      lobbyVcId:      vcConfig?.lobby_vc_id ?? null,
+      vcJoinMinutes,
+      onRequeue: (newQueueId: string, channel: any) =>
+        handleQueueFull(channel, newQueueId, teamSize, gameName, mmrEnabled, null),
+    });
+  }
 }
 
 // ─── Result vote button ───────────────────────────────────────────────────────

@@ -35,6 +35,9 @@ interface SetupState {
   staffRoleName:      string | null;
   inactivityMinutes:  number;
   queueName:          string | null;
+  lobbyVcId:          string | null;
+  lobbyVcName:        string | null;
+  vcJoinMinutes:      number;
   // Nav
   page: 1 | 2;
 }
@@ -63,14 +66,20 @@ function buildPage1Embed(s: SetupState) {
 // ─── Page 2 embed ─────────────────────────────────────────────────────────────
 
 function buildPage2Embed(s: SetupState) {
+  const vcLabel = s.vcJoinMinutes === 0
+    ? '*Disabled*'
+    : `${s.vcJoinMinutes} minute${s.vcJoinMinutes !== 1 ? 's' : ''}`;
+
   return new EmbedBuilder()
     .setTitle('⚙️ 8sBot Setup  (2/2 — Advanced)')
     .setColor(0x8B5CF6)
     .setDescription('Optional fine-tuning. All fields have sensible defaults — you can skip any.')
     .addFields(
-      { name: '🛡️ Staff Role',       value: s.staffRoleName || '*Not set — Manage Channels only*',                  inline: true },
-      { name: '⏱️ Inactivity Timeout', value: s.inactivityMinutes === 0 ? 'Never' : `${s.inactivityMinutes} minutes`, inline: true },
-      { name: '✏️ Queue Name',        value: s.queueName || `*Auto — uses game name*`,                               inline: true },
+      { name: '🛡️ Staff Role',        value: s.staffRoleName  || '*Not set — Manage Channels only*',                   inline: true },
+      { name: '⏱️ Inactivity Timeout', value: s.inactivityMinutes === 0 ? 'Never' : `${s.inactivityMinutes} minutes`,  inline: true },
+      { name: '🔊 Lobby VC',           value: s.lobbyVcName    ? `#${s.lobbyVcName}` : '*Not set*',                    inline: true },
+      { name: '🕐 VC Join Timeout',    value: vcLabel,                                                                   inline: true },
+      { name: '✏️ Queue Name',         value: s.queueName      || '*Auto — uses game name*',                            inline: true },
     );
 }
 
@@ -145,14 +154,36 @@ function buildPage2Components() {
       ])
   );
 
+  // Lobby VC — where players are moved back if a match VC check fails
+  const lobbyVcRow = new ActionRowBuilder<ChannelSelectMenuBuilder>().addComponents(
+    new ChannelSelectMenuBuilder()
+      .setCustomId('setup_lobby_vc')
+      .setPlaceholder('🔊 Lobby VC — where players return after a cancelled match (optional)')
+      .addChannelTypes(ChannelType.GuildVoice)
+  );
+
+  // VC join time — 0 = VC management disabled
+  const vcJoinRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('setup_vc_join')
+      .setPlaceholder('🕐 VC join timeout — auto-move players to team VCs (default: off)')
+      .addOptions([
+        { label: 'Disabled (no VC management)', value: '0', default: true },
+        { label: '2 minutes', value: '2' },
+        { label: '3 minutes', value: '3' },
+        { label: '4 minutes', value: '4' },
+        { label: '5 minutes', value: '5' },
+      ])
+  );
+
   const buttonRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId('setup_back').setLabel('← Back').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('setup_queue_name').setLabel('✏️ Set Queue Name').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup_queue_name').setLabel('✏️ Queue Name').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('setup_save').setLabel('💾 Save').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('setup_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary),
   );
 
-  return [staffRow, inactivityRow, buttonRow];
+  return [staffRow, inactivityRow, lobbyVcRow, vcJoinRow, buttonRow];
 }
 
 // ─── /8s-setup command ────────────────────────────────────────────────────────
@@ -169,6 +200,8 @@ export async function handleSetupCommand(interaction: ChatInputCommandInteractio
     staffRoleId: null, staffRoleName: null,
     inactivityMinutes: 60,
     queueName: null,
+    lobbyVcId: null, lobbyVcName: null,
+    vcJoinMinutes: 0,
     page: 1,
   });
 
@@ -245,6 +278,26 @@ export async function handleSetupInactivitySelect(interaction: StringSelectMenuI
   if (!pending.has(key)) return;
   const state = pending.get(key)!;
   state.inactivityMinutes = parseInt(interaction.values[0]);
+  await interaction.editReply({ embeds: [buildPage2Embed(state)], components: buildPage2Components() });
+}
+
+export async function handleSetupLobbyVcSelect(interaction: ChannelSelectMenuInteraction) {
+  await interaction.deferUpdate();
+  const key = pendingKey(interaction.guildId!, interaction.user.id);
+  if (!pending.has(key)) return;
+  const state = pending.get(key)!;
+  const channel = interaction.channels.first();
+  state.lobbyVcId   = channel?.id ?? null;
+  state.lobbyVcName = channel && 'name' in channel ? (channel.name ?? null) : null;
+  await interaction.editReply({ embeds: [buildPage2Embed(state)], components: buildPage2Components() });
+}
+
+export async function handleSetupVcJoinSelect(interaction: StringSelectMenuInteraction) {
+  await interaction.deferUpdate();
+  const key = pendingKey(interaction.guildId!, interaction.user.id);
+  if (!pending.has(key)) return;
+  const state = pending.get(key)!;
+  state.vcJoinMinutes = parseInt(interaction.values[0]);
   await interaction.editReply({ embeds: [buildPage2Embed(state)], components: buildPage2Components() });
 }
 
@@ -330,6 +383,8 @@ export async function handleSetupSave(interaction: ButtonInteraction) {
     staff_role_id:       state.staffRoleId,
     inactivity_minutes:  state.inactivityMinutes,
     queue_name:          state.queueName,
+    lobby_vc_id:         state.lobbyVcId,
+    vc_join_minutes:     state.vcJoinMinutes,
   }, { onConflict: 'guild_id,channel_id' });
 
   pending.delete(key);
@@ -342,13 +397,15 @@ export async function handleSetupSave(interaction: ButtonInteraction) {
     .setTitle('✅ 8sBot Configured!')
     .setColor(0x10B981)
     .addFields(
-      { name: '📺 Queue Channel',     value: `<#${state.channelId}>`,                                               inline: true },
-      { name: '🎮 Game',              value: state.gameName || '—',                                                 inline: true },
-      { name: '👥 Team Size',         value: `${state.teamSize}v${state.teamSize}`,                                 inline: true },
-      { name: '📣 Results Channel',   value: state.resultsChannelId ? `<#${state.resultsChannelId}>` : 'Queue channel', inline: true },
-      { name: '🛡️ Staff Role',        value: state.staffRoleName ? `@${state.staffRoleName}` : 'Manage Channels',  inline: true },
-      { name: '⏱️ Inactivity',         value: state.inactivityMinutes === 0 ? 'Never' : `${state.inactivityMinutes} min`, inline: true },
-      { name: '✏️ Queue Name',         value: state.queueName || `${state.gameName} (auto)`,                        inline: true },
+      { name: '📺 Queue Channel',     value: `<#${state.channelId}>`,                                                                  inline: true },
+      { name: '🎮 Game',              value: state.gameName || '—',                                                                  inline: true },
+      { name: '👥 Team Size',         value: `${state.teamSize}v${state.teamSize}`,                                                  inline: true },
+      { name: '📣 Results Channel',   value: state.resultsChannelId ? `<#${state.resultsChannelId}>` : 'Queue channel',             inline: true },
+      { name: '🛡️ Staff Role',        value: state.staffRoleName ? `@${state.staffRoleName}` : 'Manage Channels',                   inline: true },
+      { name: '⏱️ Inactivity',         value: state.inactivityMinutes === 0 ? 'Never' : `${state.inactivityMinutes} min`,           inline: true },
+      { name: '🔊 Lobby VC',           value: state.lobbyVcId ? `<#${state.lobbyVcId}>` : 'Not set',                                inline: true },
+      { name: '🕐 VC Join Timeout',    value: state.vcJoinMinutes === 0 ? 'Disabled' : `${state.vcJoinMinutes} min`,                inline: true },
+      { name: '✏️ Queue Name',         value: state.queueName || `${state.gameName} (auto)`,                                        inline: true },
     )
     .setDescription(`Queue embed posted in <#${state.channelId}>. Players can click **Join Queue** to enter!`);
 

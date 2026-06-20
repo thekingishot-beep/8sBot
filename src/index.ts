@@ -26,6 +26,8 @@ import {
   handleSetupSizeSelect,
   handleSetupStaffRoleSelect,
   handleSetupInactivitySelect,
+  handleSetupLobbyVcSelect,
+  handleSetupVcJoinSelect,
   handleSetupNext,
   handleSetupBack,
   handleSetupQueueNameButton,
@@ -39,6 +41,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildVoiceStates, // needed to read member.voice and move members
   ],
 });
 
@@ -72,6 +75,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   if (interaction.isChannelSelectMenu()) {
     if (interaction.customId === 'setup_channel')         return await handleSetupChannelSelect(interaction);
     if (interaction.customId === 'setup_results_channel') return await handleSetupResultsChannelSelect(interaction);
+    if (interaction.customId === 'setup_lobby_vc')        return await handleSetupLobbyVcSelect(interaction);
     return;
   }
 
@@ -85,6 +89,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       if (interaction.customId === 'setup_game')          return await handleSetupGameSelect(interaction);
       if (interaction.customId === 'setup_size')          return await handleSetupSizeSelect(interaction);
       if (interaction.customId === 'setup_inactivity')    return await handleSetupInactivitySelect(interaction);
+      if (interaction.customId === 'setup_vc_join')       return await handleSetupVcJoinSelect(interaction);
       if (interaction.customId.startsWith('lb_type_'))    return await handleLeaderboardTypeSelect(interaction);
     } catch (err) {
       console.error(`Error in select ${interaction.customId}:`, err);
