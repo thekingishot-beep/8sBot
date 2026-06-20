@@ -248,7 +248,7 @@ export async function handleLeaveButton(interaction: ButtonInteraction) {
   await supabase.from('eights_queue_players').delete().eq('id', existing.id);
 
   const { data: gameName } = await supabase.from('games').select('name').eq('id', queue.game_id).single();
-  const { data: config }   = await supabase.from('eights_channel_config').select('mmr_enabled')
+  const { data: config }   = await supabase.from('eights_channel_config').select('mmr_enabled, inactivity_minutes')
     .eq('guild_id', interaction.guildId!).eq('channel_id', interaction.channelId).single();
 
   const ch = interaction.channel as TextChannel;
