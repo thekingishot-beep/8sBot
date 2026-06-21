@@ -39,7 +39,7 @@ const inactivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
 // ─── First-join timer map (15-min hard deadline) ──────────────────────────────
 const firstJoinTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function clearFirstJoinTimer(queueId: string) {
+export function clearFirstJoinTimer(queueId: string) {
   const handle = firstJoinTimers.get(queueId);
   if (handle) { clearTimeout(handle); firstJoinTimers.delete(queueId); }
 }
@@ -483,6 +483,10 @@ export async function handleLeaveButton(interaction: ButtonInteraction) {
   if (!existing) return interaction.editReply({ content: '⚠️ You\'re not in the queue.' });
 
   await supabase.from('eights_queue_players').delete().eq('id', existing.id);
+
+  const { data: remaining } = await supabase
+    .from('eights_queue_players').select('id').eq('queue_id', queue.id);
+  if ((remaining || []).length === 0) clearFirstJoinTimer(queue.id);
 
   const { data: gameName } = await supabase.from('games').select('name').eq('id', queue.game_id).single();
   const { data: config }   = await supabase.from('eights_channel_config').select('mmr_enabled, inactivity_minutes')

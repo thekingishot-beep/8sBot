@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, TextChannel } from 'discord.js';
 import { supabase } from '../supabase';
-import { refreshQueueEmbed } from '../queueFlow';
+import { refreshQueueEmbed, clearFirstJoinTimer } from '../queueFlow';
 
 export async function handleLeave(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply({ ephemeral: true });
@@ -21,6 +21,10 @@ export async function handleLeave(interaction: ChatInputCommandInteraction) {
   if (!existing) return interaction.editReply({ content: '⚠️ You\'re not in the queue.' });
 
   await supabase.from('eights_queue_players').delete().eq('id', existing.id);
+
+  const { data: remaining } = await supabase
+    .from('eights_queue_players').select('id').eq('queue_id', queue.id);
+  if ((remaining || []).length === 0) clearFirstJoinTimer(queue.id);
 
   const { data: gameRow } = await supabase.from('games').select('name').eq('id', queue.game_id).single();
   const { data: config }  = await supabase.from('eights_channel_config').select('mmr_enabled')
