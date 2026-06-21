@@ -985,10 +985,45 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
 
 // ─── Rematch button ───────────────────────────────────────────────────────────
 
-export async function handleRematchButton(interaction: ButtonInteraction, matchId: string) {
-  await interaction.deferReply({ ephemeral: true });
+const rematchVotes = new Map<string, Set<string>>();
+const REMATCH_THRESHOLD = 6;
 
-  const guildId = interaction.guildId!;
+export async function handleRematchButton(interaction: ButtonInteraction, matchId: string) {
+  await interaction.deferUpdate();
+
+  const discordId = interaction.user.id;
+  const guildId   = interaction.guildId!;
+
+  if (!rematchVotes.has(matchId)) rematchVotes.set(matchId, new Set());
+  const votes = rematchVotes.get(matchId)!;
+
+  if (votes.has(discordId)) {
+    await interaction.followUp({ content: '⚠️ You already voted for rematch.', ephemeral: true });
+    return;
+  }
+
+  votes.add(discordId);
+  const count = votes.size;
+
+  const updatedRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`rematch_${matchId}`)
+      .setLabel(`🔁 Rematch (${count}/${REMATCH_THRESHOLD})`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(count >= REMATCH_THRESHOLD),
+  );
+
+  const existingEmbeds = interaction.message.embeds;
+
+  if (count < REMATCH_THRESHOLD) {
+    await interaction.editReply({ embeds: existingEmbeds, components: [updatedRow] });
+    await interaction.followUp({ content: `✅ Rematch vote counted! (${count}/${REMATCH_THRESHOLD} needed)`, ephemeral: true });
+    return;
+  }
+
+  // Threshold reached — disable button then trigger
+  rematchVotes.delete(matchId);
+  await interaction.editReply({ embeds: existingEmbeds, components: [updatedRow] });
 
   const { data: match } = await supabase
     .from('eights_matches')
@@ -996,14 +1031,14 @@ export async function handleRematchButton(interaction: ButtonInteraction, matchI
     .eq('id', matchId)
     .single();
 
-  if (!match) return interaction.editReply({ content: '❌ Match not found.' });
+  if (!match) return;
 
   const { data: players } = await supabase
     .from('eights_match_players')
     .select('discord_id, profile_id')
     .eq('match_id', matchId);
 
-  if (!players || players.length === 0) return interaction.editReply({ content: '❌ No players found for this match.' });
+  if (!players || players.length === 0) return;
 
   const { data: config } = await supabase
     .from('eights_channel_config')
@@ -1012,17 +1047,14 @@ export async function handleRematchButton(interaction: ButtonInteraction, matchI
     .eq('channel_id', match.channel_id)
     .single();
 
-  if (!config) return interaction.editReply({ content: '❌ Queue channel config not found.' });
+  if (!config) return;
 
   let ch: any;
   try {
     ch = await interaction.client.channels.fetch(match.channel_id);
     if (!ch || !('send' in ch)) throw new Error();
-  } catch {
-    return interaction.editReply({ content: '❌ Could not find the original queue channel.' });
-  }
+  } catch { return; }
 
-  // Reuse an existing waiting queue or create a fresh one
   const { data: existingWaiting } = await supabase
     .from('eights_queues')
     .select('id')
@@ -1047,7 +1079,7 @@ export async function handleRematchButton(interaction: ButtonInteraction, matchI
       })
       .select('id')
       .single();
-    if (!newQueue) return interaction.editReply({ content: '❌ Failed to create rematch queue.' });
+    if (!newQueue) return;
     queueId = newQueue.id;
   }
 
@@ -1062,6 +1094,5 @@ export async function handleRematchButton(interaction: ButtonInteraction, matchI
   );
 
   const gameName = config.queue_name || 'Queue';
-  await interaction.editReply({ content: `🔁 Rematch queued! All ${players.length} players re-added.` });
   await handleQueueFull(ch as TextChannel, queueId, config.team_size, gameName, config.mmr_enabled, null);
 }
