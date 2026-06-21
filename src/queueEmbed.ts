@@ -6,6 +6,7 @@ import {
   StringSelectMenuBuilder,
 } from 'discord.js';
 import { MmrDelta, MMR_START } from './mmr';
+import { Bo5Map } from './mapPool';
 
 const SITE_URL = process.env.SITE_URL || 'https://scrimcenter.com';
 
@@ -124,16 +125,19 @@ export function buildMapVoteEmbed(options: Array<{ id: string; name: string; mod
 export function buildMatchEmbed(
   team1: string[],
   team2: string[],
-  map: string,
-  mode: string,
+  bo5Maps: Bo5Map[],
   teamSelection: string,
   matchNumber?: number,
   captain1Name?: string,
   captain2Name?: string
 ) {
-  const title = matchNumber ? `⚔️ Match #${matchNumber}` : '⚔️ Match Ready';
+  const title   = matchNumber ? `⚔️ Match #${matchNumber}` : '⚔️ Match Ready';
   const t1Label = captain1Name ? `🔵 ${captain1Name}'s Team Won` : '🔵 Team 1 Won';
   const t2Label = captain2Name ? `🔴 ${captain2Name}'s Team Won` : '🔴 Team 2 Won';
+
+  const seriesText = bo5Maps.length > 0
+    ? bo5Maps.map(m => `**Game ${m.gameNumber}** · ${m.modeName} · ${m.map}`).join('\n')
+    : 'TBD';
 
   const embed = new EmbedBuilder()
     .setTitle(title)
@@ -142,10 +146,9 @@ export function buildMatchEmbed(
     .addFields(
       { name: captain1Name ? `🔵 ${captain1Name}'s Team` : '🔵 Team 1', value: team1.join('\n') || '—', inline: true },
       { name: captain2Name ? `🔴 ${captain2Name}'s Team` : '🔴 Team 2', value: team2.join('\n') || '—', inline: true },
-      { name: '​',    value: '​',                 inline: true },
-      { name: '🗺️ Map',    value: map,                      inline: true },
-      { name: '🎯 Mode',   value: mode,                     inline: true },
-      { name: '⚙️ Teams',  value: teamSelection,             inline: true },
+      { name: '​', value: '​', inline: true },
+      { name: '📋 Map Series (Best of 5)', value: seriesText, inline: false },
+      { name: '⚙️ Teams', value: teamSelection, inline: true },
     )
     .setTimestamp();
 
@@ -164,45 +167,33 @@ export function buildWinnerEmbed(
   team2Tags: string[],
   winnerTeam: 1 | 2,
   deltas: MmrDelta[],
-  map: string,
-  mode: string,
+  bo5Maps: Bo5Map[],
   matchNumber?: number,
   mmrEnabled?: boolean
 ) {
-  const queueLabel = matchNumber ? `Queue#${matchNumber}` : 'Queue';
-
-  const mmrForTeam = (tags: string[], team: 1 | 2, allDeltas: MmrDelta[]) => {
-    const discordIdFromTag = (tag: string) => tag.replace(/[<@>]/g, '');
-    const teamDeltas = allDeltas.filter(d => {
-      const id = discordIdFromTag(tags.find(t => t.includes(d.discordId)) || '');
-      return !!id;
-    });
-    const sign = team === winnerTeam ? '+' : '-';
-    const change = team === winnerTeam ? 25 : 25;
-    return mmrEnabled ? `${sign}${change} MMR` : null;
-  };
-
-  const winTeamLabel = winnerTeam === 1 ? '🔵 Team 1' : '🔴 Team 2';
+  const matchLabel   = matchNumber ? `Match #${matchNumber}` : 'Match';
+  const winTeamLabel  = winnerTeam === 1 ? '🔵 Team 1' : '🔴 Team 2';
   const loseTeamLabel = winnerTeam === 1 ? '🔴 Team 2' : '🔵 Team 1';
-  const winTeamTags = winnerTeam === 1 ? team1Tags : team2Tags;
-  const loseTeamTags = winnerTeam === 1 ? team2Tags : team1Tags;
+  const winTeamTags   = winnerTeam === 1 ? team1Tags : team2Tags;
+  const loseTeamTags  = winnerTeam === 1 ? team2Tags : team1Tags;
 
   const buildTeamField = (tags: string[], isWinner: boolean) => {
     if (!mmrEnabled) return tags.join('\n') || '—';
-    const delta = isWinner ? `+${25}` : `-${25}`;
+    const delta = isWinner ? `+25` : `-25`;
     return tags.join('\n') + `\n**${delta} MMR**`;
   };
 
   const embed = new EmbedBuilder()
-    .setTitle(`🏆 Winner For ${queueLabel}`)
+    .setTitle(`🏆 ${matchLabel} — Series Complete`)
     .setColor(0xF59E0B)
     .addFields(
-      { name: `${winTeamLabel} WIN`,  value: buildTeamField(winTeamTags, true),   inline: true },
-      { name: `${loseTeamLabel} LOSS`, value: buildTeamField(loseTeamTags, false), inline: true },
+      { name: `${winTeamLabel} WIN`,    value: buildTeamField(winTeamTags,  true),  inline: true },
+      { name: `${loseTeamLabel} LOSS`,  value: buildTeamField(loseTeamTags, false), inline: true },
     );
 
-  if (map && map !== 'TBD') {
-    embed.setFooter({ text: `Map: ${map}  |  Mode: ${mode}` });
+  if (bo5Maps.length > 0) {
+    const seriesText = bo5Maps.map(m => `**Game ${m.gameNumber}** · ${m.modeName} · ${m.map}`).join('\n');
+    embed.addFields({ name: '📋 Series', value: seriesText, inline: false });
   }
 
   return embed;

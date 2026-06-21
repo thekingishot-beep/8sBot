@@ -9,7 +9,7 @@ import {
 } from 'discord.js';
 import { supabase } from './supabase';
 import { getMmrMap, MMR_START, snakeTeam } from './mmr';
-import { getMapPool, pickRandomMaps } from './mapPool';
+import { getMapPool, pickBo5Maps } from './mapPool';
 
 const AUTO_PICK_SECONDS = 60;
 
@@ -226,20 +226,15 @@ async function renderDraftEmbed(state: CaptainDraftState, remainingSeconds?: num
 async function finalizeDraft(state: CaptainDraftState) {
   drafts.delete(state.queueId);
 
-  const pool   = await getMapPool(state.gameId);
-  const maps   = pickRandomMaps(pool, 1);
-  const chosen = maps[0];
-
-  const mapName  = chosen?.name     || 'TBD';
-  const modeName = chosen?.modeName || 'TBD';
+  const pool    = await getMapPool(state.gameId);
+  const bo5Maps = pickBo5Maps(pool);
 
   const { startMatchFromTeams } = await import('./queueFlow');
   await startMatchFromTeams(
     state.queueId,
     state.team1,
     state.team2,
-    mapName,
-    modeName,
+    bo5Maps,
     'captains',
     state.voteMsg,
     state.captain1Name,

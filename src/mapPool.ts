@@ -8,6 +8,13 @@ export interface MapPool {
   gameModes: GameModeEntry[];
 }
 
+export interface Bo5Map {
+  gameNumber: number;
+  map:        string;
+  mode:       string;
+  modeName:   string;
+}
+
 // Reads the map pool from site_settings — same data source as /admin-match-settings
 export async function getMapPool(gameId: string | null): Promise<MapPool> {
   const key = gameId ? `match_settings_${gameId}` : 'match_settings';
@@ -30,19 +37,40 @@ export async function getMapPool(gameId: string | null): Promise<MapPool> {
   }
 }
 
-// Pick N random maps across all modes for a vote
-export function pickRandomMaps(pool: MapPool, count = 4): Array<MapEntry & { mode: string; modeName: string }> {
-  const all: Array<MapEntry & { mode: string; modeName: string }> = [];
-  for (const [modeKey, maps] of Object.entries(pool.maps)) {
-    const modeName = pool.gameModes.find(m => m.key === modeKey)?.name || modeKey;
-    for (const map of maps) {
-      all.push({ ...map, mode: modeKey, modeName });
-    }
-  }
-  // Fisher-Yates shuffle then slice
-  for (let i = all.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [all[i], all[j]] = [all[j], all[i]];
-  }
-  return all.slice(0, count);
+// CDL BO5 mode order: HP → S&D → Overload → HP → S&D
+// Each slot picks a random map from the matching mode; same mode slots (1+4, 2+5)
+// will never repeat a map if the pool has enough entries.
+const BO5_SLOTS: Array<{ label: string; pattern: RegExp }> = [
+  { label: 'Hardpoint',        pattern: /hardpoint/i        },
+  { label: 'Search & Destroy', pattern: /search/i           },
+  { label: 'Overload',         pattern: /overload|control/i },
+  { label: 'Hardpoint',        pattern: /hardpoint/i        },
+  { label: 'Search & Destroy', pattern: /search/i           },
+];
+
+export function pickBo5Maps(pool: MapPool): Bo5Map[] {
+  const findModeKey = (pattern: RegExp): string | null =>
+    pool.gameModes.find(m => pattern.test(m.name))?.key ?? null;
+
+  // Track used map IDs per mode so games 1+4 and 2+5 don't repeat the same map
+  const usedByMode = new Map<string, Set<string>>();
+
+  return BO5_SLOTS.map(({ label, pattern }, i) => {
+    const modeKey = findModeKey(pattern);
+    if (!modeKey) return { gameNumber: i + 1, map: 'TBD', mode: 'TBD', modeName: label };
+
+    const modeName = pool.gameModes.find(m => m.key === modeKey)?.name || label;
+    const allMaps  = pool.maps[modeKey] || [];
+
+    if (!usedByMode.has(modeKey)) usedByMode.set(modeKey, new Set());
+    const used = usedByMode.get(modeKey)!;
+
+    const available = allMaps.filter(m => !used.has(m.id));
+    const source    = available.length > 0 ? available : allMaps; // fallback if pool is small
+    const picked    = source[Math.floor(Math.random() * source.length)];
+
+    if (picked) used.add(picked.id);
+
+    return { gameNumber: i + 1, map: picked?.name || 'TBD', mode: modeKey, modeName };
+  });
 }

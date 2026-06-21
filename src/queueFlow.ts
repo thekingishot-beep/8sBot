@@ -7,7 +7,7 @@ import {
   OverwriteType,
 } from 'discord.js';
 import { supabase } from './supabase';
-import { getMapPool, pickRandomMaps } from './mapPool';
+import { getMapPool, pickBo5Maps, Bo5Map } from './mapPool';
 import {
   buildQueueEmbed,
   buildTeamVoteEmbed,
@@ -642,14 +642,11 @@ async function resolveTeamVote(
     team2 = shuffled.slice(teamSize);
   }
 
-  // Random map pick — no vote
-  const pool   = await getMapPool(queue.game_id);
-  const maps   = pickRandomMaps(pool, 1);
-  const chosen = maps[0];
-  const mapName  = chosen?.name     || 'TBD';
-  const modeName = chosen?.modeName || 'TBD';
+  // Pick a random BO5 series (no vote)
+  const pool    = await getMapPool(queue.game_id);
+  const bo5Maps = pickBo5Maps(pool);
 
-  await startMatchFromTeams(queueId, team1, team2, mapName, modeName, winner, voteMsg);
+  await startMatchFromTeams(queueId, team1, team2, bo5Maps, winner, voteMsg);
 }
 
 // ─── Start match (shared entry point) ────────────────────────────────────────
@@ -658,8 +655,7 @@ export async function startMatchFromTeams(
   queueId: string,
   team1: Array<{ discord_id: string; profile_id: string | null }>,
   team2: Array<{ discord_id: string; profile_id: string | null }>,
-  map: string,
-  mode: string,
+  bo5Maps: Bo5Map[],
   teamSelection: string,
   voteMsg: Message,
   captain1Name?: string,
@@ -670,8 +666,8 @@ export async function startMatchFromTeams(
 
   await supabase.from('eights_queues').update({
     status:      'in_progress',
-    chosen_map:  map,
-    chosen_mode: mode,
+    chosen_map:  bo5Maps[0]?.map  || 'TBD',
+    chosen_mode: bo5Maps[0]?.mode || 'TBD',
   }).eq('id', queueId);
 
   const { count } = await supabase
@@ -685,8 +681,9 @@ export async function startMatchFromTeams(
     guild_id:        queue.guild_id,
     channel_id:      queue.channel_id,
     game_id:         queue.game_id,
-    map,
-    mode,
+    map:             bo5Maps[0]?.map  || 'TBD',
+    mode:            bo5Maps[0]?.mode || 'TBD',
+    bo5_maps:        bo5Maps,
     team_selection:  teamSelection,
     status:          'in_progress',
     match_number:    matchNumber,
@@ -704,7 +701,7 @@ export async function startMatchFromTeams(
   const team1Tags = team1.map(p => `<@${p.discord_id}>`);
   const team2Tags = team2.map(p => `<@${p.discord_id}>`);
 
-  const { embed, row } = buildMatchEmbed(team1Tags, team2Tags, map, mode, teamSelection, matchNumber, captain1Name, captain2Name);
+  const { embed, row } = buildMatchEmbed(team1Tags, team2Tags, bo5Maps, teamSelection, matchNumber, captain1Name, captain2Name);
   await voteMsg.edit({ content: '⚔️ Match is live! GL HF', embeds: [embed], components: [row] });
   await supabase.from('eights_matches').update({ message_id: voteMsg.id }).eq('id', match.id);
 
@@ -820,13 +817,14 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
     const team1Players = (allVotes || []).filter(v => v.team === 1).map(v => `<@${v.discord_id}>`);
     const team2Players = (allVotes || []).filter(v => v.team === 2).map(v => `<@${v.discord_id}>`);
 
+    const bo5Maps: Bo5Map[] = Array.isArray(match.bo5_maps) ? match.bo5_maps : [];
+
     const winEmbed = buildWinnerEmbed(
       team1Players,
       team2Players,
       winner as 1 | 2,
       deltas,
-      match.map || 'TBD',
-      match.mode || 'TBD',
+      bo5Maps,
       match.match_number,
       mmrEnabled
     );
