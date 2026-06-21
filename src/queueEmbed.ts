@@ -44,7 +44,7 @@ export function buildQueueEmbed(
     new ButtonBuilder()
       .setLabel('Web Queue')
       .setStyle(ButtonStyle.Link)
-      .setURL(`${SITE_URL}/8s`),
+      .setURL(`${SITE_URL}/#8s`),
     new ButtonBuilder()
       .setCustomId('queue_force_start')
       .setLabel('Force Start')
