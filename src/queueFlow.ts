@@ -2,6 +2,7 @@ import {
   ButtonInteraction,
   Message,
   TextChannel,
+  VoiceChannel,
   ChannelType,
   PermissionFlagsBits,
   OverwriteType,
@@ -853,13 +854,38 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
       } catch {}
     }
 
-    // Delete team VCs stored as "team1VcId,team2VcId"
+    // Move players back to lobby VC, then delete team VCs
     const vcIds = (match.voice_channel_id || '').split(',').filter(Boolean);
-    for (const vcId of vcIds) {
-      try {
-        const ch = await interaction.client.channels.fetch(vcId);
-        if (ch) await (ch as any).delete('Match completed').catch(() => {});
-      } catch {}
+    if (vcIds.length > 0 && interaction.guild) {
+      const { data: vcCfg } = await supabase
+        .from('eights_channel_config')
+        .select('lobby_vc_id')
+        .eq('guild_id', match.guild_id)
+        .eq('channel_id', match.channel_id)
+        .single();
+
+      const lobbyVcId = vcCfg?.lobby_vc_id ?? null;
+      const lobbyVc   = lobbyVcId
+        ? interaction.guild.channels.cache.get(lobbyVcId) as VoiceChannel | undefined
+        : undefined;
+
+      for (const vcId of vcIds) {
+        try {
+          const vc = interaction.guild.channels.cache.get(vcId) as VoiceChannel | undefined;
+          if (vc) {
+            if (lobbyVc) {
+              for (const [, member] of vc.members) {
+                await member.voice.setChannel(lobbyVc).catch(() => {});
+              }
+            }
+            await vc.delete('Match completed').catch(() => {});
+          } else {
+            // Not in cache — fetch and delete without moving (can't read members)
+            const fetched = await interaction.client.channels.fetch(vcId).catch(() => null);
+            if (fetched) await (fetched as any).delete('Match completed').catch(() => {});
+          }
+        } catch {}
+      }
     }
 
   } else {
