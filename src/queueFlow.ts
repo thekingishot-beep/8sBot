@@ -816,8 +816,16 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
       deltas = await applyMmrAfterMatch(match.id, match.guild_id, winner as 1 | 2);
     }
 
-    const team1Players = (allVotes || []).filter(v => v.team === 1).map(v => `<@${v.discord_id}>`);
-    const team2Players = (allVotes || []).filter(v => v.team === 2).map(v => `<@${v.discord_id}>`);
+    const mmrAfterMap = new Map(deltas.map((d: any) => [d.discordId as string, d.mmrAfter as number]));
+
+    const fmtPlayer = (v: { discord_id: string }) => {
+      const tag = `<@${v.discord_id}>`;
+      const mmr = mmrAfterMap.get(v.discord_id);
+      return mmrEnabled && mmr !== undefined ? `${tag} (${mmr})` : tag;
+    };
+
+    const team1Players = (allVotes || []).filter(v => v.team === 1).map(fmtPlayer);
+    const team2Players = (allVotes || []).filter(v => v.team === 2).map(fmtPlayer);
 
     const bo5Maps: Bo5Map[] = Array.isArray(match.bo5_maps) ? match.bo5_maps : [];
 
