@@ -29,8 +29,10 @@ export function buildQueueEmbed(
     .setTitle(`${gameName} ${teamSize}v${teamSize} Queue`)
     .setColor(0x3B82F6)
     .setDescription(playerLines)
-    .addFields({ name: '​', value: `**Queue ${filled}/${total}**` })
-    .setFooter({ text: '🌐 Sign up at www.scrimcenter.com — Track stats, join leagues & more!' })
+    .addFields(
+      { name: '​', value: `**Queue ${filled}/${total}**` },
+      { name: '​', value: `🌐 Sign up at [www.scrimcenter.com](${SITE_URL}) — Track stats, join leagues & more!` },
+    )
     .setTimestamp();
 
   const joinRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
