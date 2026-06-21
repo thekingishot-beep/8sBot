@@ -874,25 +874,22 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
         .single();
 
       const lobbyVcId = vcCfg?.lobby_vc_id ?? null;
-      const lobbyVc   = lobbyVcId
-        ? interaction.guild.channels.cache.get(lobbyVcId) as VoiceChannel | undefined
-        : undefined;
+      // Always fetch via REST so we're not at the mercy of the bot's channel cache
+      const lobbyVc = lobbyVcId
+        ? await interaction.client.channels.fetch(lobbyVcId).catch(() => null) as VoiceChannel | null
+        : null;
 
       for (const vcId of vcIds) {
         try {
-          const vc = interaction.guild.channels.cache.get(vcId) as VoiceChannel | undefined;
-          if (vc) {
-            if (lobbyVc) {
-              for (const [, member] of vc.members) {
-                await member.voice.setChannel(lobbyVc).catch(() => {});
-              }
+          const vc = await interaction.client.channels.fetch(vcId).catch(() => null) as VoiceChannel | null;
+          if (!vc) continue;
+          // Move every member to lobby before deleting so Discord doesn't force-disconnect them
+          if (lobbyVc) {
+            for (const [, member] of vc.members) {
+              await member.voice.setChannel(lobbyVc).catch(() => {});
             }
-            await vc.delete('Match completed').catch(() => {});
-          } else {
-            // Not in cache — fetch and delete without moving (can't read members)
-            const fetched = await interaction.client.channels.fetch(vcId).catch(() => null);
-            if (fetched) await (fetched as any).delete('Match completed').catch(() => {});
           }
+          await vc.delete('Match completed').catch(() => {});
         } catch {}
       }
     }
