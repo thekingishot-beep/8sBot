@@ -177,10 +177,20 @@ export async function handleQueueFull(
   }
   clearFirstJoinTimer(queueId);
 
-  await supabase.from('eights_queues').update({ status: 'voting_teams' }).eq('id', queueId);
-
   const guild   = (channel as TextChannel).guild;
   const guildId = guild.id;
+  const chanId  = (channel as TextChannel).id;
+
+  // Delete any stuck queues for this channel so the unique constraint doesn't
+  // block the status transitions below (in_progress/voting_teams from failed matches)
+  await supabase.from('eights_queues')
+    .delete()
+    .eq('guild_id', guildId)
+    .eq('channel_id', chanId)
+    .neq('id', queueId)
+    .in('status', ['voting_teams', 'in_progress']);
+
+  await supabase.from('eights_queues').update({ status: 'voting_teams' }).eq('id', queueId);
 
   // Fetch config
   const { data: config } = await supabase
