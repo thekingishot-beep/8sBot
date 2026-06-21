@@ -218,6 +218,7 @@ export async function handleQueueFull(
 
   // Build permission overwrites for the private channel
   const staffRoleId = config?.staff_role_id ?? null;
+  const botId       = guild.client.user?.id;
   const permOverwrites: any[] = [
     {
       id:   guildId,
@@ -235,6 +236,18 @@ export async function handleQueueFull(
       id:    staffRoleId,
       type:  OverwriteType.Role,
       allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+    });
+  }
+  if (botId) {
+    permOverwrites.push({
+      id:    botId,
+      type:  OverwriteType.Member,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.ManageMessages,
+      ],
     });
   }
 
@@ -516,7 +529,10 @@ export async function handleTeamVoteButton(
     .eq('status', 'voting_teams')
     .single();
 
-  if (!queue) return;
+  if (!queue) {
+    await interaction.followUp({ content: '⚠️ This vote has already closed.', ephemeral: true });
+    return;
+  }
 
   const { data: player } = await supabase
     .from('eights_queue_players').select('id')
@@ -533,7 +549,7 @@ export async function handleTeamVoteButton(
 
   const mmrVotes: Record<string, string[]> = queue.mmr_vote || {};
   const { embed, rows } = buildTeamVoteEmbed(queue.id, votes, mmrVotes);
-  await interaction.message.edit({ embeds: [embed], components: rows });
+  await interaction.editReply({ embeds: [embed], components: rows });
 
   await interaction.followUp({ content: `✅ Voted **${choice}**.`, ephemeral: true });
 }
@@ -554,7 +570,10 @@ export async function handleMmrVoteButton(
     .eq('status', 'voting_teams')
     .single();
 
-  if (!queue) return;
+  if (!queue) {
+    await interaction.followUp({ content: '⚠️ This vote has already closed.', ephemeral: true });
+    return;
+  }
 
   const { data: player } = await supabase
     .from('eights_queue_players').select('id')
@@ -571,7 +590,7 @@ export async function handleMmrVoteButton(
 
   const teamVotes: Record<string, string[]> = queue.team_vote || {};
   const { embed, rows } = buildTeamVoteEmbed(queue.id, teamVotes, mmrVotes);
-  await interaction.message.edit({ embeds: [embed], components: rows });
+  await interaction.editReply({ embeds: [embed], components: rows });
 
   await interaction.followUp({ content: `✅ MMR vote: **${choice}**.`, ephemeral: true });
 }
