@@ -35,6 +35,10 @@ import {
   handleSetupCancel,
 } from './setupFlow';
 import { handleRemoveCommand } from './removeFlow';
+import { handleMmrSet, handleVoidMatch } from './commands/adminCommands';
+import { handleConfig8s } from './commands/config8s';
+import { handleRematchButton } from './queueFlow';
+import { startDecayService } from './decayService';
 
 const client = new Client({
   intents: [
@@ -46,6 +50,7 @@ const client = new Client({
 
 client.once(Events.ClientReady, (c) => {
   console.log(`✅ 8sBot online as ${c.user.tag}`);
+  startDecayService();
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
@@ -61,6 +66,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       if (commandName === 'leaderboard') return await handleLeaderboard(interaction);
       if (commandName === '8s-setup')    return await handleSetupCommand(interaction);
       if (commandName === '8s-remove')   return await handleRemoveCommand(interaction);
+      if (commandName === '8s-config')   return await handleConfig8s(interaction);
+      if (commandName === 'mmr-set')     return await handleMmrSet(interaction);
+      if (commandName === 'void-match')  return await handleVoidMatch(interaction);
     } catch (err) {
       console.error(`Error in /${commandName}:`, err);
       const msg = { content: '❌ Something went wrong. Try again.', ephemeral: true };
@@ -148,6 +156,12 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       // Result vote
       if (customId === 'result_1') return await handleResultButton(interaction, 1);
       if (customId === 'result_2') return await handleResultButton(interaction, 2);
+
+      // Rematch — format: rematch_{matchId}
+      if (customId.startsWith('rematch_')) {
+        const matchId = customId.slice('rematch_'.length);
+        return await handleRematchButton(interaction, matchId);
+      }
 
       // Leaderboard pagination
       if (customId.startsWith('lb_prev_') || customId.startsWith('lb_next_') ||

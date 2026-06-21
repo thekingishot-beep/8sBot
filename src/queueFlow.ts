@@ -6,6 +6,9 @@ import {
   ChannelType,
   PermissionFlagsBits,
   OverwriteType,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } from 'discord.js';
 import { supabase } from './supabase';
 import { getMapPool, pickBo5Maps, Bo5Map } from './mapPool';
@@ -18,6 +21,7 @@ import {
 import {
   getMmrMap,
   applyMmrAfterMatch,
+  assignRankRoles,
   splitBalanced,
   splitUnfair,
   touchMmrRow,
@@ -430,6 +434,13 @@ export async function handleJoinButton(interaction: ButtonInteraction) {
   }
 
   await interaction.editReply({ content: `✅ You joined the queue! [${count}/${total}]` });
+
+  // Ping the configured role when one spot remains
+  if (count === total - 1 && config.queue_ping_role_id) {
+    try {
+      await ch.send({ content: `<@&${config.queue_ping_role_id}> 🔔 Queue is at **${count}/${total}** — one spot left!` });
+    } catch { /* non-fatal */ }
+  }
 
   if (count === 1) {
     startFirstJoinTimerForQueue({
@@ -875,6 +886,9 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
     let deltas: any[] = [];
     if (mmrEnabled) {
       deltas = await applyMmrAfterMatch(match.id, match.guild_id, winner as 1 | 2);
+      if (interaction.guild) {
+        assignRankRoles(interaction.guild, deltas, match.guild_id).catch(() => {});
+      }
     }
 
     const mmrAfterMap = new Map(deltas.map((d: any) => [d.discordId as string, d.mmrAfter as number]));
@@ -909,7 +923,13 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
     try {
       const targetCh = await interaction.client.channels.fetch(targetChId) as any;
       if (targetCh && 'send' in targetCh) {
-        await targetCh.send({ embeds: [winEmbed] });
+        const rematchRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`rematch_${match.id}`)
+            .setLabel('🔁 Rematch')
+            .setStyle(ButtonStyle.Secondary),
+        );
+        await targetCh.send({ embeds: [winEmbed], components: [rematchRow] });
       }
     } catch (err) {
       console.error('[handleResultButton] Could not post winner embed:', err);
@@ -961,4 +981,87 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
       ephemeral: true,
     });
   }
+}
+
+// ─── Rematch button ───────────────────────────────────────────────────────────
+
+export async function handleRematchButton(interaction: ButtonInteraction, matchId: string) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const guildId = interaction.guildId!;
+
+  const { data: match } = await supabase
+    .from('eights_matches')
+    .select('id, guild_id, channel_id, game_id')
+    .eq('id', matchId)
+    .single();
+
+  if (!match) return interaction.editReply({ content: '❌ Match not found.' });
+
+  const { data: players } = await supabase
+    .from('eights_match_players')
+    .select('discord_id, profile_id')
+    .eq('match_id', matchId);
+
+  if (!players || players.length === 0) return interaction.editReply({ content: '❌ No players found for this match.' });
+
+  const { data: config } = await supabase
+    .from('eights_channel_config')
+    .select('*')
+    .eq('guild_id', guildId)
+    .eq('channel_id', match.channel_id)
+    .single();
+
+  if (!config) return interaction.editReply({ content: '❌ Queue channel config not found.' });
+
+  let ch: any;
+  try {
+    ch = await interaction.client.channels.fetch(match.channel_id);
+    if (!ch || !('send' in ch)) throw new Error();
+  } catch {
+    return interaction.editReply({ content: '❌ Could not find the original queue channel.' });
+  }
+
+  // Reuse an existing waiting queue or create a fresh one
+  const { data: existingWaiting } = await supabase
+    .from('eights_queues')
+    .select('id')
+    .eq('guild_id', guildId)
+    .eq('channel_id', match.channel_id)
+    .eq('status', 'waiting')
+    .single();
+
+  let queueId: string;
+  if (existingWaiting) {
+    queueId = existingWaiting.id;
+    await supabase.from('eights_queue_players').delete().eq('queue_id', queueId);
+  } else {
+    const { data: newQueue } = await supabase
+      .from('eights_queues')
+      .insert({
+        guild_id:   guildId,
+        channel_id: match.channel_id,
+        game_id:    config.game_id,
+        team_size:  config.team_size,
+        status:     'waiting',
+      })
+      .select('id')
+      .single();
+    if (!newQueue) return interaction.editReply({ content: '❌ Failed to create rematch queue.' });
+    queueId = newQueue.id;
+  }
+
+  const mmrMap = await getMmrMap(players.map(p => p.discord_id), guildId);
+  await supabase.from('eights_queue_players').insert(
+    players.map(p => ({
+      queue_id:          queueId,
+      discord_id:        p.discord_id,
+      profile_id:        p.profile_id,
+      mmr_at_queue_time: mmrMap[p.discord_id] ?? MMR_START,
+    }))
+  );
+
+  const gameName = config.queue_name || 'Queue';
+  await interaction.editReply({ content: `🔁 Rematch queued! All ${players.length} players re-added.` });
+  await handleQueueFull(ch as TextChannel, queueId, config.team_size, gameName, config.mmr_enabled, null);
 }

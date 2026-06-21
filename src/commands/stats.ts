@@ -16,18 +16,15 @@ export async function handleStats(interaction: ChatInputCommandInteraction) {
 
   const displayName = profile?.display_name || profile?.username || targetUser.displayName;
 
-  // Pull match history
-  const { data: matchPlayers } = await supabase
-    .from('eights_match_players')
-    .select('team, match_id, eights_matches!inner(winner_team, status, map, mode, created_at, guild_id)')
+  // Pull win/loss counts from history (explicit won boolean — reliable source)
+  const { data: historyAll } = await supabase
+    .from('eights_mmr_history')
+    .select('won')
     .eq('discord_id', discordId)
-    .eq('eights_matches.guild_id', guildId)
-    .eq('eights_matches.status', 'completed')
-    .order('created_at', { referencedTable: 'eights_matches', ascending: false });
+    .eq('guild_id', guildId);
 
-  const completed = (matchPlayers || []) as any[];
-  const wins   = completed.filter(mp => mp.team === mp.eights_matches?.winner_team).length;
-  const losses = completed.length - wins;
+  const wins   = (historyAll || []).filter(h => h.won).length;
+  const losses = (historyAll || []).filter(h => !h.won).length;
 
   // Pull MMR history for recent games
   const { data: mmrHistory } = await supabase
