@@ -30,6 +30,7 @@ export function buildQueueEmbed(
     .setColor(0x3B82F6)
     .setDescription(playerLines)
     .addFields({ name: '​', value: `**Queue ${filled}/${total}**` })
+    .setFooter({ text: '🌐 Sign up at www.scrimcenter.com — Track stats, join leagues & more!' })
     .setTimestamp();
 
   const joinRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
