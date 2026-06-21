@@ -84,27 +84,59 @@ function startFirstJoinTimerForQueue(params: {
   firstJoinTimers.set(queueId, handle);
 }
 
-function resetInactivityTimer(queueId: string, channelId: string, messageId: string | null, inactivityMinutes: number, channel: any) {
+function resetInactivityTimer(
+  queueId:           string,
+  channelId:         string,
+  messageId:         string | null,
+  inactivityMinutes: number,
+  channel:           any,
+  teamSize:          number,
+  gameName:          string,
+  mmrEnabled:        boolean
+) {
   if (inactivityTimers.has(queueId)) clearTimeout(inactivityTimers.get(queueId)!);
 
   const timer = setTimeout(async () => {
     inactivityTimers.delete(queueId);
 
-    const { data: queue } = await supabase.from('eights_queues').select('status').eq('id', queueId).single();
+    const { data: queue } = await supabase.from('eights_queues').select('status, message_id').eq('id', queueId).single();
     if (!queue || queue.status !== 'waiting') return;
 
-    await supabase.from('eights_queues').update({ status: 'cancelled' }).eq('id', queueId);
+    // Count players before clearing so we know whether to notify
+    const { data: players } = await supabase.from('eights_queue_players').select('id').eq('queue_id', queueId);
+    const hadPlayers = (players || []).length > 0;
 
-    if (messageId) {
+    if (!hadPlayers) return; // Nothing to reset — timer restarts naturally on next join
+
+    // Clear players but keep the queue alive (status stays 'waiting')
+    await supabase.from('eights_queue_players').delete().eq('queue_id', queueId);
+
+    // Rebuild embed at 0/N
+    const { embed, row } = buildQueueEmbed([], teamSize, gameName, mmrEnabled);
+    const msgId = queue.message_id || messageId;
+    let newMsgId = msgId;
+
+    if (msgId) {
       try {
-        const msg = await channel.messages.fetch(messageId);
-        await msg.edit({
-          content: `⏱️ **Queue emptied due to ${inactivityMinutes} minutes of inactivity.**\nRe-enter the queue if you are still looking to play!`,
-          embeds: [],
-          components: [],
-        });
-      } catch { /* message gone */ }
+        const msg = await channel.messages.fetch(msgId);
+        await msg.edit({ content: '', embeds: [embed], components: [row] });
+      } catch {
+        const sent = await channel.send({ embeds: [embed], components: [row] });
+        newMsgId = sent.id;
+        await supabase.from('eights_queues').update({ message_id: newMsgId }).eq('id', queueId);
+      }
+    } else {
+      const sent = await channel.send({ embeds: [embed], components: [row] });
+      newMsgId = sent.id;
+      await supabase.from('eights_queues').update({ message_id: newMsgId }).eq('id', queueId);
     }
+
+    await channel.send({
+      content: `⏱️ Queue reset after **${inactivityMinutes} minutes** of inactivity. Re-enter if you're still looking to play!`,
+    });
+
+    // Restart timer so future inactivity also resets
+    resetInactivityTimer(queueId, channelId, newMsgId, inactivityMinutes, channel, teamSize, gameName, mmrEnabled);
   }, inactivityMinutes * 60 * 1000);
 
   inactivityTimers.set(queueId, timer);
@@ -144,7 +176,7 @@ export async function refreshQueueEmbed(
   if (existingMessageId) {
     try {
       const msg = await channel.messages.fetch(existingMessageId);
-      await msg.edit({ embeds: [embed], components: [row] });
+      await msg.edit({ content: '', embeds: [embed], components: [row] });
       msgId = existingMessageId;
     } catch { /* message deleted — fall through to send */ }
   }
@@ -155,7 +187,7 @@ export async function refreshQueueEmbed(
   }
 
   if (inactivityMinutes && inactivityMinutes > 0) {
-    resetInactivityTimer(queueId, channel.id, msgId, inactivityMinutes, channel);
+    resetInactivityTimer(queueId, channel.id, msgId, inactivityMinutes, channel, teamSize, gameName, mmrEnabled);
   }
 
   return msgId;
