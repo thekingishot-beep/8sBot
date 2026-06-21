@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, TextChannel } from 'discord.js';
 import { supabase } from '../supabase';
-import { refreshQueueEmbed, handleQueueFull } from '../queueFlow';
+import { refreshQueueEmbed, handleQueueFull, startFirstJoinTimerForQueue } from '../queueFlow';
 import { touchMmrRow } from '../mmr';
 
 export async function handleJoin(interaction: ChatInputCommandInteraction) {
@@ -62,6 +62,29 @@ export async function handleJoin(interaction: ChatInputCommandInteraction) {
   const count = (players || []).length;
 
   await interaction.editReply({ content: `✅ You joined the queue! [${count}/${total}]` });
+
+  // Ping the configured role when one spot remains
+  if (count === total - 1 && config.queue_ping_role_id) {
+    try {
+      await channel.send({ content: `<@&${config.queue_ping_role_id}> 🔔 Queue is at **${count}/${total}** — one spot left!` });
+    } catch { /* non-fatal */ }
+  }
+
+  // Start first-join timer when player #1 enters via slash command
+  if (count === 1) {
+    startFirstJoinTimerForQueue({
+      queueId:           queue.id,
+      channelId,
+      guildId,
+      gameId:            config.game_id,
+      teamSize:          config.team_size,
+      displayName:       gameName,
+      mmrEnabled:        config.mmr_enabled,
+      inactivityMinutes: config.inactivity_minutes ?? 60,
+      client:            interaction.client,
+      currentMsgId:      newMsgId || queue.message_id,
+    });
+  }
 
   if (count >= total) {
     await handleQueueFull(channel, queue.id, config.team_size, gameName, config.mmr_enabled, newMsgId || queue.message_id);

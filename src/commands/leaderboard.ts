@@ -4,25 +4,24 @@ import { buildLeaderboardEmbed, LbType } from '../queueEmbed';
 
 const PAGE_SIZE = 10;
 
-async function fetchLeaderboard(guildId: string, type: LbType, page: number) {
-  // Get all MMR rows for this guild
+async function fetchAllLeaderboard(guildId: string, type: LbType) {
   const { data: mmrRows } = await supabase
     .from('eights_player_mmr')
     .select('discord_id, discord_username, mmr')
     .eq('guild_id', guildId);
 
-  // Get win/loss counts per player
-  const { data: matchPlayers } = await supabase
-    .from('eights_match_players')
-    .select('discord_id, team, eights_matches!inner(winner_team, guild_id)')
-    .eq('eights_matches.guild_id', guildId);
+  // Use eights_mmr_history (explicit won boolean) — reliable source for W/L
+  const { data: historyRows } = await supabase
+    .from('eights_mmr_history')
+    .select('discord_id, won')
+    .eq('guild_id', guildId);
 
   const statsMap: Record<string, { wins: number; games: number }> = {};
-  for (const row of (matchPlayers || []) as any[]) {
+  for (const row of (historyRows || [])) {
     const id = row.discord_id;
     if (!statsMap[id]) statsMap[id] = { wins: 0, games: 0 };
     statsMap[id].games++;
-    if (row.team === row.eights_matches?.winner_team) statsMap[id].wins++;
+    if (row.won) statsMap[id].wins++;
   }
 
   const merged = (mmrRows || []).map(r => ({
@@ -37,17 +36,18 @@ async function fetchLeaderboard(guildId: string, type: LbType, page: number) {
       : 0,
   })).filter(r => r.games > 0 || r.mmr !== 1000);
 
-  // Sort
   if (type === 'mmr')     merged.sort((a, b) => b.mmr - a.mmr);
   if (type === 'winrate') merged.sort((a, b) => b.winRate - a.winRate || b.games - a.games);
   if (type === 'wins')    merged.sort((a, b) => b.wins - a.wins || b.mmr - a.mmr);
   if (type === 'games')   merged.sort((a, b) => b.games - a.games || b.mmr - a.mmr);
 
-  const totalPages = Math.max(1, Math.ceil(merged.length / PAGE_SIZE));
-  const safePage   = Math.min(Math.max(1, page), totalPages);
-  const slice      = merged.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  return merged;
+}
 
-  return { entries: slice, totalPages, page: safePage };
+function paginateLeaderboard(all: ReturnType<typeof fetchAllLeaderboard> extends Promise<infer T> ? T : never, page: number) {
+  const totalPages = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
+  const safePage   = Math.min(Math.max(1, page), totalPages);
+  return { entries: all.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE), totalPages, page: safePage };
 }
 
 export async function handleLeaderboard(interaction: ChatInputCommandInteraction) {
@@ -60,12 +60,9 @@ export async function handleLeaderboard(interaction: ChatInputCommandInteraction
     ? await supabase.from('games').select('name').eq('id', config.game_id).single()
     : { data: null };
 
-  const { entries, totalPages, page } = await fetchLeaderboard(guildId, 'mmr', 1);
-
-  if (entries.length === 0) {
-    return interaction.editReply({ content: '📊 No players yet. Play some matches first!' });
-  }
-
+  const all = await fetchAllLeaderboard(guildId, 'mmr');
+  if (all.length === 0) return interaction.editReply({ content: '📊 No players yet. Play some matches first!' });
+  const { entries, totalPages, page } = paginateLeaderboard(all, 1);
   const { embed, rows } = buildLeaderboardEmbed(entries, page, totalPages, 'mmr', gameRow?.name, config?.mmr_enabled);
   await interaction.editReply({ embeds: [embed], components: rows });
 }
@@ -87,13 +84,13 @@ export async function handleLeaderboardButton(interaction: ButtonInteraction) {
     ? await supabase.from('games').select('name').eq('id', config.game_id).single()
     : { data: null };
 
-  const { entries, totalPages } = await fetchLeaderboard(guildId, type, 1);
+  const all        = await fetchAllLeaderboard(guildId, type);
+  const totalPages = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
   const targetPage = action === 'first' ? 1
     : action === 'last'  ? totalPages
     : action === 'next'  ? Math.min(currPage + 1, totalPages)
     : Math.max(currPage - 1, 1);
-
-  const { entries: pageEntries, page } = await fetchLeaderboard(guildId, type, targetPage);
+  const { entries: pageEntries, page } = paginateLeaderboard(all, targetPage);
   const { embed, rows } = buildLeaderboardEmbed(pageEntries, page, totalPages, type, gameRow?.name, config?.mmr_enabled);
   await interaction.message.edit({ embeds: [embed], components: rows });
 }
@@ -113,7 +110,8 @@ export async function handleLeaderboardTypeSelect(interaction: StringSelectMenuI
     ? await supabase.from('games').select('name').eq('id', config.game_id).single()
     : { data: null };
 
-  const { entries, totalPages, page } = await fetchLeaderboard(guildId, type, 1);
+  const all = await fetchAllLeaderboard(guildId, type);
+  const { entries, totalPages, page } = paginateLeaderboard(all, 1);
   const { embed, rows } = buildLeaderboardEmbed(entries, page, totalPages, type, gameRow?.name, config?.mmr_enabled);
   await interaction.message.edit({ embeds: [embed], components: rows });
 }

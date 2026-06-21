@@ -210,6 +210,16 @@ async function checkVcPhase(matchId: string) {
     return;
   }
 
+  // Guard: if match was already completed or cancelled before VC timeout fired, do nothing
+  const { data: matchCheck } = await supabase.from('eights_matches').select('status').eq('id', matchId).single();
+  if (!matchCheck || matchCheck.status !== 'in_progress') {
+    await Promise.all([
+      team1Vc?.delete('Match no longer in progress').catch(() => {}),
+      team2Vc?.delete('Match no longer in progress').catch(() => {}),
+    ]);
+    return;
+  }
+
   const missingMentions = missingIds.map(id => `<@${id}>`).join(', ');
   console.log(`[vcFlow] Match ${matchId} cancelled — VC timeout for: ${missingIds.join(', ')}`);
 

@@ -44,7 +44,7 @@ function clearFirstJoinTimer(queueId: string) {
   if (handle) { clearTimeout(handle); firstJoinTimers.delete(queueId); }
 }
 
-function startFirstJoinTimerForQueue(params: {
+export function startFirstJoinTimerForQueue(params: {
   queueId:           string;
   channelId:         string;
   guildId:           string;
