@@ -118,20 +118,18 @@ export async function applyMmrAfterMatch(
       discord_id:    p.discord_id,
       guild_id:      guildId,
       mmr:           after,
-      peak_mmr:      after,
       win_streak:    newStreak,
       last_match_at: now,
       updated_at:    now,
     }, { onConflict: 'discord_id,guild_id' });
 
+    // Only update peak_mmr if this is a new all-time high
     if (delta > 0) {
-      try {
-        await supabase.from('eights_player_mmr')
-          .update({ peak_mmr: after })
-          .eq('discord_id', p.discord_id)
-          .eq('guild_id', guildId)
-          .lt('peak_mmr', after);
-      } catch { /* non-fatal */ }
+      await supabase.from('eights_player_mmr')
+        .update({ peak_mmr: after })
+        .eq('discord_id', p.discord_id)
+        .eq('guild_id', guildId)
+        .lt('peak_mmr', after);
     }
   }
 

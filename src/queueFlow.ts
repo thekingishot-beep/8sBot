@@ -563,6 +563,44 @@ export async function handleCancelQueue(interaction: ButtonInteraction) {
     } catch { /* message gone */ }
   }
 
+  // Create a fresh queue so the channel is immediately usable again
+  const { data: freshQueue } = await supabase
+    .from('eights_queues')
+    .insert({
+      guild_id:   queue.guild_id,
+      channel_id: queue.channel_id,
+      game_id:    queue.game_id,
+      team_size:  queue.team_size,
+      status:     'waiting',
+    })
+    .select('id')
+    .single();
+
+  if (freshQueue) {
+    const { data: cfg } = await supabase
+      .from('eights_channel_config')
+      .select('mmr_enabled, inactivity_minutes, queue_name, game_id')
+      .eq('guild_id', queue.guild_id)
+      .eq('channel_id', queue.channel_id)
+      .single();
+    const { data: gameRow } = cfg?.game_id
+      ? await supabase.from('games').select('name').eq('id', cfg.game_id).single()
+      : { data: null };
+    const displayName = cfg?.queue_name || gameRow?.name || 'Queue';
+    const newMsgId = await refreshQueueEmbed(
+      interaction.channel as TextChannel,
+      freshQueue.id,
+      queue.team_size,
+      displayName,
+      cfg?.mmr_enabled ?? true,
+      null,
+      cfg?.inactivity_minutes ?? 60,
+    );
+    if (newMsgId) {
+      await supabase.from('eights_queues').update({ message_id: newMsgId }).eq('id', freshQueue.id);
+    }
+  }
+
   await interaction.editReply({ content: '✅ Queue cancelled.' });
 }
 
@@ -895,8 +933,14 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
 
     const fmtPlayer = (v: { discord_id: string }) => {
       const tag = `<@${v.discord_id}>`;
+      if (!mmrEnabled) return tag;
+      const d = deltas.find((x: any) => x.discordId === v.discord_id);
+      if (d) {
+        const sign = d.delta >= 0 ? '+' : '';
+        return `${tag} (${d.mmrAfter}, **${sign}${d.delta}**)`;
+      }
       const mmr = mmrAfterMap.get(v.discord_id);
-      return mmrEnabled && mmr !== undefined ? `${tag} (${mmr})` : tag;
+      return mmr !== undefined ? `${tag} (${mmr})` : tag;
     };
 
     const team1Players = (allVotes || []).filter(v => v.team === 1).map(fmtPlayer);
@@ -993,6 +1037,18 @@ export async function handleRematchButton(interaction: ButtonInteraction, matchI
 
   const discordId = interaction.user.id;
   const guildId   = interaction.guildId!;
+
+  const { data: wasInMatch } = await supabase
+    .from('eights_match_players')
+    .select('id')
+    .eq('match_id', matchId)
+    .eq('discord_id', discordId)
+    .single();
+
+  if (!wasInMatch) {
+    await interaction.followUp({ content: '❌ Only players from this match can vote for a rematch.', ephemeral: true });
+    return;
+  }
 
   if (!rematchVotes.has(matchId)) rematchVotes.set(matchId, new Set());
   const votes = rematchVotes.get(matchId)!;

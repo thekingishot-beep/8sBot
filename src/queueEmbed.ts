@@ -180,18 +180,14 @@ export function buildWinnerEmbed(
   const winTeamTags   = winnerTeam === 1 ? team1Tags : team2Tags;
   const loseTeamTags  = winnerTeam === 1 ? team2Tags : team1Tags;
 
-  const buildTeamField = (tags: string[], isWinner: boolean) => {
-    if (!mmrEnabled) return tags.join('\n') || '—';
-    const delta = isWinner ? `+25` : `-25`;
-    return tags.join('\n') + `\n**${delta} MMR**`;
-  };
+  const buildTeamField = (tags: string[]) => tags.join('\n') || '—';
 
   const embed = new EmbedBuilder()
     .setTitle(`🏆 ${matchLabel} — Series Complete`)
     .setColor(0xF59E0B)
     .addFields(
-      { name: `${winTeamLabel} WIN`,    value: buildTeamField(winTeamTags,  true),  inline: true },
-      { name: `${loseTeamLabel} LOSS`,  value: buildTeamField(loseTeamTags, false), inline: true },
+      { name: `${winTeamLabel} WIN`,    value: buildTeamField(winTeamTags),  inline: true },
+      { name: `${loseTeamLabel} LOSS`,  value: buildTeamField(loseTeamTags), inline: true },
     );
 
   if (bo5Maps.length > 0) {
