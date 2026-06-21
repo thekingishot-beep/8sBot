@@ -106,6 +106,12 @@ export async function startCaptainDraft(
   };
   drafts.set(queue.id, state);
 
+  // No players left to pick after captains are assigned — start match immediately
+  if (state.remaining.length === 0) {
+    await finalizeDraft(state);
+    return;
+  }
+
   await renderDraftEmbed(state, AUTO_PICK_SECONDS);
   scheduleAutoPick(state);
 }
