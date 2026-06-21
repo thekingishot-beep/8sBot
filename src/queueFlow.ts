@@ -639,8 +639,9 @@ async function resolveTeamVote(
     team1 = split.team1; team2 = split.team2;
   } else {
     const shuffled = [...playerObjs].sort(() => Math.random() - 0.5);
-    team1 = shuffled.slice(0, teamSize);
-    team2 = shuffled.slice(teamSize);
+    const half = Math.ceil(shuffled.length / 2);
+    team1 = shuffled.slice(0, half);
+    team2 = shuffled.slice(half);
   }
 
   // Pick a random BO5 series (no vote)
