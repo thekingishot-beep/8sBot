@@ -42,7 +42,7 @@ export function buildQueueEmbed(
       .setLabel('Leave Queue')
       .setStyle(ButtonStyle.Danger),
     new ButtonBuilder()
-      .setLabel('Web Queue')
+      .setLabel('View Leaderboard')
       .setStyle(ButtonStyle.Link)
       .setURL(`${SITE_URL}/#leaderboard/8s`),
     new ButtonBuilder()
