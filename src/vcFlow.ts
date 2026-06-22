@@ -111,10 +111,13 @@ export async function startVcPhase(params: {
     return;
   }
 
-  // Store both VC IDs in the match record (comma-separated) for cleanup after result
+  // Store both VC IDs and the phase start time in the match record for cleanup + restart recovery
   await supabase
     .from('eights_matches')
-    .update({ voice_channel_id: `${team1Vc.id},${team2Vc.id}` })
+    .update({
+      voice_channel_id:    `${team1Vc.id},${team2Vc.id}`,
+      vc_phase_started_at: new Date().toISOString(),
+    })
     .eq('id', matchId);
 
   // Move or DM every player
@@ -206,7 +209,8 @@ async function checkVcPhase(matchId: string) {
   const missingIds = [...missing1, ...missing2];
 
   if (missingIds.length === 0) {
-    // All players present — match continues normally, VCs stay until result
+    // All players present — VC phase complete, clear the marker
+    await supabase.from('eights_matches').update({ vc_phase_started_at: null }).eq('id', matchId);
     return;
   }
 
@@ -244,7 +248,7 @@ async function checkVcPhase(matchId: string) {
     team2Vc?.delete('VC timeout — match cancelled').catch(() => {}),
   ]);
 
-  await supabase.from('eights_matches').update({ status: 'cancelled' }).eq('id', matchId);
+  await supabase.from('eights_matches').update({ status: 'cancelled', vc_phase_started_at: null }).eq('id', matchId);
 
   // Get MMR only for the players who showed up
   const { data: mmrRows } = await supabase
@@ -315,4 +319,17 @@ export function clearVcPhase(matchId: string) {
     clearTimeout(state.timer);
     vcPhases.delete(matchId);
   }
+  supabase.from('eights_matches').update({ vc_phase_started_at: null }).eq('id', matchId).then(() => {});
+}
+
+// ─── Restore VC phase after bot restart ──────────────────────────────────────
+
+export function recoverVcPhase(
+  matchId: string,
+  state: Omit<VcPhaseState, 'timer'>,
+  remainingMs: number
+) {
+  const delayMs = Math.max(0, remainingMs);
+  const timer   = setTimeout(() => checkVcPhase(matchId), delayMs);
+  vcPhases.set(matchId, { ...state, timer });
 }

@@ -39,6 +39,7 @@ import { handleMmrSet, handleVoidMatch } from './commands/adminCommands';
 import { handleConfig8s } from './commands/config8s';
 import { handleRematchButton } from './queueFlow';
 import { startDecayService } from './decayService';
+import { recoverOnStartup } from './startup';
 
 const client = new Client({
   intents: [
@@ -48,9 +49,10 @@ const client = new Client({
   ],
 });
 
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
   console.log(`✅ 8sBot online as ${c.user.tag}`);
   startDecayService();
+  await recoverOnStartup(c);
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {

@@ -42,6 +42,7 @@ const firstJoinTimers = new Map<string, ReturnType<typeof setTimeout>>();
 export function clearFirstJoinTimer(queueId: string) {
   const handle = firstJoinTimers.get(queueId);
   if (handle) { clearTimeout(handle); firstJoinTimers.delete(queueId); }
+  supabase.from('eights_queues').update({ first_join_at: null }).eq('id', queueId).then(() => {});
 }
 
 export function startFirstJoinTimerForQueue(params: {
@@ -55,16 +56,36 @@ export function startFirstJoinTimerForQueue(params: {
   inactivityMinutes: number;
   client:            any;
   currentMsgId:      string | null;
+  delayMs?:          number; // override for restart recovery; omit for fresh start
 }) {
   const { queueId, channelId, guildId, gameId, teamSize, displayName, mmrEnabled, inactivityMinutes, client, currentMsgId } = params;
-  clearFirstJoinTimer(queueId);
+
+  // Cancel any existing in-memory timer without clearing DB (we're about to write DB below)
+  const existing = firstJoinTimers.get(queueId);
+  if (existing) { clearTimeout(existing); firstJoinTimers.delete(queueId); }
+
+  const isRecovery = params.delayMs !== undefined;
+  const delay      = isRecovery ? Math.max(0, params.delayMs!) : FIRST_JOIN_MINUTES * 60 * 1000;
+
+  // Persist first_join_at so a future restart can recover the timer
+  if (!isRecovery) {
+    supabase.from('eights_queues')
+      .update({ first_join_at: new Date().toISOString() })
+      .eq('id', queueId).then(() => {});
+  } else if (delay > 0) {
+    // Recalculate first_join_at to reflect remaining time so double-restart also works
+    const syntheticStart = new Date(Date.now() - (FIRST_JOIN_MINUTES * 60 * 1000 - delay));
+    supabase.from('eights_queues')
+      .update({ first_join_at: syntheticStart.toISOString() })
+      .eq('id', queueId).then(() => {});
+  }
 
   const handle = setTimeout(async () => {
     firstJoinTimers.delete(queueId);
     const { data: q } = await supabase.from('eights_queues').select('status, message_id').eq('id', queueId).single();
     if (!q || q.status !== 'waiting') return;
 
-    await supabase.from('eights_queues').update({ status: 'cancelled' }).eq('id', queueId);
+    await supabase.from('eights_queues').update({ status: 'cancelled', first_join_at: null }).eq('id', queueId);
     await supabase.from('eights_queue_players').delete().eq('queue_id', queueId);
     if (inactivityTimers.has(queueId)) { clearTimeout(inactivityTimers.get(queueId)!); inactivityTimers.delete(queueId); }
 
@@ -83,7 +104,7 @@ export function startFirstJoinTimerForQueue(params: {
         if (freshMsgId) await supabase.from('eights_queues').update({ message_id: freshMsgId }).eq('id', newQ.id);
       }
     } catch (err) { console.error('[firstJoinTimer] Error resetting queue:', err); }
-  }, FIRST_JOIN_MINUTES * 60 * 1000);
+  }, delay);
 
   firstJoinTimers.set(queueId, handle);
 }
@@ -211,7 +232,7 @@ export async function handleQueueFull(
     clearTimeout(inactivityTimers.get(queueId)!);
     inactivityTimers.delete(queueId);
   }
-  clearFirstJoinTimer(queueId);
+  clearFirstJoinTimer(queueId); // also clears first_join_at in DB
 
   const guild   = (channel as TextChannel).guild;
   const guildId = guild.id;
@@ -1033,7 +1054,6 @@ export async function handleResultButton(interaction: ButtonInteraction, winnerT
 
 // ─── Rematch button ───────────────────────────────────────────────────────────
 
-const rematchVotes = new Map<string, Set<string>>();
 const REMATCH_THRESHOLD = 6;
 
 export async function handleRematchButton(interaction: ButtonInteraction, matchId: string) {
@@ -1054,16 +1074,23 @@ export async function handleRematchButton(interaction: ButtonInteraction, matchI
     return;
   }
 
-  if (!rematchVotes.has(matchId)) rematchVotes.set(matchId, new Set());
-  const votes = rematchVotes.get(matchId)!;
+  // Fetch current votes from DB (persisted across restarts)
+  const { data: matchRow } = await supabase
+    .from('eights_matches')
+    .select('rematch_vote_ids')
+    .eq('id', matchId)
+    .single();
 
-  if (votes.has(discordId)) {
+  const currentVotes: string[] = matchRow?.rematch_vote_ids || [];
+
+  if (currentVotes.includes(discordId)) {
     await interaction.followUp({ content: '⚠️ You already voted for rematch.', ephemeral: true });
     return;
   }
 
-  votes.add(discordId);
-  const count = votes.size;
+  const newVotes = [...currentVotes, discordId];
+  await supabase.from('eights_matches').update({ rematch_vote_ids: newVotes }).eq('id', matchId);
+  const count = newVotes.length;
 
   const updatedRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
@@ -1081,8 +1108,8 @@ export async function handleRematchButton(interaction: ButtonInteraction, matchI
     return;
   }
 
-  // Threshold reached — disable button then trigger
-  rematchVotes.delete(matchId);
+  // Threshold reached — clear votes in DB, disable button, then trigger
+  await supabase.from('eights_matches').update({ rematch_vote_ids: [] }).eq('id', matchId);
   await interaction.editReply({ embeds: existingEmbeds, components: [updatedRow] });
 
   const { data: match } = await supabase
